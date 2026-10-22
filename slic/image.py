@@ -2,6 +2,7 @@
 
 import numpy as np
 from PIL import Image
+from os import PathLike
 
 image_path = "/home/hhr/3_autumn/media/Saliency_Detection/images/"
 
@@ -27,6 +28,14 @@ def prepare_rgb(image: np.ndarray) -> np.ndarray:
         形状为 (H, W, 3) 的 float32 数组，范围为 [0, 1]。
         返回独立数组，不修改输入。
     """
+    if not isinstance(image, np.ndarray):
+        raise TypeError("图像必须是 NumPy 数组。")
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("RGB 图像的形状必须为 (H, W, 3)。")
+
+    if image.shape[0] == 0 or image.shape[1] == 0:
+        raise ValueError("图像的高度和宽度必须大于 0。")
 
     # uint8 的取值天然位于 [0, 255]，直接转换并缩放。
     if image.dtype == np.uint8:
@@ -34,6 +43,12 @@ def prepare_rgb(image: np.ndarray) -> np.ndarray:
 
     if not np.issubdtype(image.dtype, np.floating):
         raise TypeError("图像仅支持 uint8 或浮点类型。")
+
+    if not np.isfinite(image).all():
+        raise ValueError("图像不能包含 NaN 或无穷大。")
+
+    if np.any(image < 0.0) or np.any(image > 1.0):
+        raise ValueError("浮点图像的数值必须位于 [0, 1]。")
 
     return image.astype(np.float32, copy=True)
 

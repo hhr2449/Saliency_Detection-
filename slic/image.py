@@ -3,6 +3,7 @@
 import numpy as np
 from PIL import Image
 from os import PathLike
+from skimage.color import rgb2lab
 
 
 def load_rgb(image_path: str | PathLike[str]) -> np.ndarray:
@@ -54,7 +55,7 @@ def prepare_rgb(image: np.ndarray) -> np.ndarray:
 
 
 def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
-    """将 RGB 图像转换为标准尺度的 CIE Lab 图像。
+    """将 RGB 图像转换为标准尺度的 Lab 图像。
 
     输入遵循 prepare_rgb() 的约定。
     返回形状为 (H, W, 3) 的 float32 数组，通道依次为 L、a、b。

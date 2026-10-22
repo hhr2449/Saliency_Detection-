@@ -4056,3 +4056,367 @@ def relabel_contiguous(labels: np.ndarray) -> np.ndarray:
 
 以上是静态检查，尚未实际运行。最关键的修复是 **`sizes > 0` 的筛选条件**，否则第一次合并后就可能在下一轮报错。
 
+---
+
+## 第 36 次问答
+
+时间：2026-10-22 21:10:55 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+我们现在已经基本上完成了SLIC阶段的各种处理函数。我现在在想如何串联其这个处理流程。我考虑的是可以使用一个core函数进行组织，输入图像的数组、还有期望区域数，区域阈值参数等，然后调用之前的函数进行处理，最后输出中心点数组、label区域标记数组、各区域的像素数
+
+**助手（2026-10-22 21:11:42 +08:00）：**
+
+**这个组织方式合适：用一个 `core` 函数串联前面的各个步骤，对外提供完整的 SLIC 分割接口。** 输入图像和参数，输出最终标签图、区域中心及面积。
+
+其中最需要注意的是：**连通性处理改变了像素归属和标签编号，因此返回的中心与面积必须根据最终标签图重新计算，不能直接返回聚类迭代结束时的中心。**
+
+你可以把接口设计成：
+
+```python
+def slic(
+    image: np.ndarray,
+    n_segments: int = 200,
+    compactness: float = 10.0,
+    max_iter: int = 10,
+    min_size_factor: float = 0.25,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ...
+```
+
+这里明确约定 `image` 为 **RGB 数组**，遵循你已经写好的 `prepare_rgb()` 输入规则。几个参数分别控制：
+
+| 参数 | 含义 |
+|---|---|
+| `n_segments` | 期望超像素数量 |
+| `compactness` | 颜色距离与空间距离的权衡参数 \(m\) |
+| `max_iter` | 聚类迭代次数 |
+| `min_size_factor` | 小区域面积阈值相对于参考面积的比例 |
+
+整个函数按下面的顺序组织。
+
+**1. 输入检查与颜色转换。**
+
+检查参数，例如 `max_iter` 必须为正整数、`min_size_factor` 为有限的非负数，然后将 RGB 转成 Lab：
+
+```python
+lab = rgb_to_lab(image)
+```
+
+你的 `rgb_to_lab()` 内部已经调用了 `prepare_rgb()`，因此这里可以直接使用。
+
+**2. 初始化中心，并调整到低梯度位置。**
+
+```python
+gradient = compute_gradient(lab)
+centers, step = initialize_centers(lab, n_segments)
+centers = perturb_centers(lab, centers, gradient)
+
+n_initial_centers = len(centers)
+```
+
+保存实际初始中心数，后面用它计算面积阈值。
+
+**3. 迭代执行像素分配和中心更新。**
+
+```python
+for _ in range(max_iter):
+    labels = assign_pixels(lab, centers, step, compactness)
+    centers = update_centers(lab, labels, centers)
+```
+
+得到原始聚类标签图。
+
+**4. 提取连通块，合并小区域，并连续编号。**
+
+```python
+component_map, component_sizes = split_components(labels)
+
+min_size = max(
+    1,
+    int(min_size_factor * labels.size / n_initial_centers),
+)
+
+final_labels = merge_small_components(
+    component_map,
+    component_sizes,
+    min_size,
+)
+```
+
+你的 `merge_small_components()` 最后已经调用了 `relabel_contiguous()`，因此这里不必再次重编号。
+
+**5. 根据最终标签，重新统计中心和面积。**
+
+例如，合并前区域 `2` 的中心只代表区域 `2` 的像素；如果区域 `5` 并入了它，新的中心就应该代表两个区域的全部像素。重编号后，中心数组的行号也必须与新标签保持一致。
+
+可以先统计最终面积：
+
+```python
+final_sizes = np.bincount(final_labels.ravel())
+n_final = len(final_sizes)
+```
+
+再利用你已有的 `update_centers()` 计算最终均值：
+
+```python
+initial_final_centers = np.zeros((n_final, 5), dtype=np.float64)
+
+final_centers = update_centers(
+    lab,
+    final_labels,
+    initial_final_centers,
+)
+```
+
+这里传入零数组是为了给函数提供最终区域数。由于最终标签连续且每个编号都有像素，所有中心都会被实际均值覆盖，不会进入“空区域保留旧中心”的分支。
+
+**6. 返回三个相互对应的结果。**
+
+按照你提出的顺序返回：
+
+```python
+return final_centers, final_labels, final_sizes
+```
+
+它们的对应关系必须明确：
+
+```text
+final_labels[y, x] == k
+        ↓
+像素 (y, x) 属于最终超像素 k
+        ↓
+final_centers[k] 是该区域的 [平均L, 平均a, 平均b, 平均y, 平均x]
+final_sizes[k] 是该区域的像素数量
+```
+
+最终形状分别是：
+
+```python
+final_centers.shape == (K_final, 5)
+final_labels.shape == (H, W)
+final_sizes.shape == (K_final,)
+```
+
+其中 `K_final` 可能与期望的 `n_segments` 不同，这是网格取整、连通块拆分和小区域合并共同作用的正常结果。
+
+这样组织后，后续图构建可以直接使用 **`final_labels` 提取区域邻接关系，使用 `final_centers[:, :3]` 获取区域平均 Lab 颜色**，接口就能自然衔接起来。
+
+---
+
+## 第 37 次问答
+
+时间：2026-10-22 21:12:35 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+所以相当于这个函数就是slic 模块对外的接口，外部函数将图片和相关参数输入进去，然后输入处理好的结果
+
+**助手（2026-10-22 21:12:52 +08:00）：**
+
+**对，这个函数就是 SLIC 模块对外的统一接口。** 外部代码把图像数组和相关参数传进去，函数内部完成整个 SLIC 流程，然后**输出**处理好的结果。
+
+调用时可以这样写：
+
+```python
+centers, labels, sizes = slic(
+    image=rgb,
+    n_segments=200,
+    compactness=10.0,
+    max_iter=10,
+    min_size_factor=0.25,
+)
+```
+
+外部代码只需要知道：
+
+- **输入约定**：RGB 图像数组，以及区域数、紧致度、迭代次数、面积阈值比例。
+- **输出约定**：最终区域中心、标签图和各区域面积，三者使用相同的区域编号。
+
+颜色转换、初始化、迭代更新、连通性处理等细节，都由这个函数在内部组织。后续显著性检测流程直接调用 `slic()`，再使用返回结果构建超像素图即可。
+
+文件可以叫 `core.py`，对外的函数命名为 `slic()`，这样调用时能直接看出它的作用。
+
+---
+
+## 第 38 次问答
+
+时间：2026-10-22 21:25:03 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""SLIC 算法顶层接口。"""
+
+import numpy as np
+
+from .image import rgb_to_lab
+from .initialization import compute_gradient, initialize_centers, perturb_centers
+from .clustering import assign_pixels, update_centers
+from .connectivity import split_components, merge_small_components
+
+
+def slic(
+    image: np.ndarray,
+    n_segments: int = 200,
+    compactness: float = 10.0,
+    max_iter: int = 10,
+    min_size_factor: float = 0.25,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """RGB 图像的 SLIC 超像素分割。"""
+    lab = rgb_to_lab(image)
+
+    # 1. 初始化聚类中心并微调
+    grad = compute_gradient(lab)
+    centers, step = initialize_centers(lab, n_segments)
+    centers = perturb_centers(lab, centers, grad)
+    k_init = len(centers)
+
+    # 2. 局部 K-Means 迭代更新
+    for _ in range(max_iter):
+        labels = assign_pixels(lab, centers, step, compactness)
+        centers = update_centers(lab, labels, centers)
+
+    # 3. 连通域分离与小块合并
+    comp_map, comp_sizes = split_components(labels)
+    min_size = int(min_size_factor * (labels.size / k_init))
+    
+    final_labels = merge_small_components(comp_map, comp_sizes, max(1, min_size))
+
+    # 4. 统计最终超像素的特征与大小
+    final_sizes = np.bincount(final_labels.ravel())
+    n_final = len(final_sizes)
+
+    # 计算最终中心 (L, a, b, y, x)
+    final_centers = np.zeros((n_final, 5), dtype=np.float64)
+    ys, xs = np.indices(lab.shape[:2])
+    
+    for k in range(n_final):
+        mask = (final_labels == k)
+        if np.any(mask):
+            final_centers[k, :3] = lab[mask].mean(axis=0)
+            final_centers[k, 3] = ys[mask].mean()
+            final_centers[k, 4] = xs[mask].mean()
+
+    return final_centers, final_labels, final_sizes
+```
+
+我实现了一下这个对外接口，请你检查一下是否存在问题
+
+**助手（2026-10-22 21:25:50 +08:00）：**
+
+**整体串联是正确的，最终中心也根据连通性处理后的标签重新计算了，三个返回值能够保持对应。** 在输入参数正常、前面各个函数已按讨论修复的情况下，这个接口可以完成完整的 SLIC 流程。
+
+目前主要需要补充的是**参数检查**，其中 `max_iter` 的检查会直接影响函数能否正常执行。
+
+**1. `max_iter` 必须是正整数。**
+
+现在如果传入 `max_iter=0` 或负数：
+
+```python
+for _ in range(max_iter):
+    labels = assign_pixels(...)
+```
+
+循环不会执行，`labels` 没有定义，后面这行就会报错：
+
+```python
+comp_map, comp_sizes = split_components(labels)
+```
+
+建议在函数开头补上：
+
+```python
+if isinstance(max_iter, (bool, np.bool_)) or not isinstance(
+    max_iter, (int, np.integer)
+):
+    raise TypeError("max_iter 必须是整数。")
+
+if max_iter < 1:
+    raise ValueError("max_iter 必须大于等于 1。")
+```
+
+**2. `min_size_factor` 应为有限的非负数。**
+
+你现在的写法：
+
+```python
+min_size = int(min_size_factor * (labels.size / k_init))
+final_labels = merge_small_components(comp_map, comp_sizes, max(1, min_size))
+```
+
+计算逻辑没有问题，但如果比例是负数，`max(1, min_size)` 会把它变成 `1`，从而掩盖错误输入。如果比例是 `NaN` 或无穷大，转换为整数时会报错。
+
+可以先检查：
+
+```python
+if not np.isfinite(min_size_factor) or min_size_factor < 0:
+    raise ValueError("min_size_factor 必须是有限的非负数。")
+```
+
+允许它为 `0` 是合理的：这时阈值取 `1`，不会合并任何非空连通块，但仍会完成连通块拆分和连续编号。
+
+阈值计算也可以合并写成：
+
+```python
+min_size = max(
+    1,
+    int(min_size_factor * labels.size / k_init),
+)
+
+final_labels = merge_small_components(comp_map, comp_sizes, min_size)
+```
+
+其他参数的检查可以沿用内部函数已有的逻辑：`n_segments` 由 `initialize_centers()` 检查，`compactness` 由 `assign_pixels()` 检查。前提是你保留了之前补充的相关检查。
+
+**3. 最终中心和面积的统计是正确的。**
+
+这部分：
+
+```python
+final_sizes = np.bincount(final_labels.ravel())
+```
+
+在 `final_labels` 已经从 `0` 连续编号的前提下，能够正确统计各区域面积。
+
+随后：
+
+```python
+final_centers[k, :3] = lab[mask].mean(axis=0)
+final_centers[k, 3] = ys[mask].mean()
+final_centers[k, 4] = xs[mask].mean()
+```
+
+也正确遵循了 `[L, a, b, y, x]` 的顺序。这些中心代表的是**最终超像素的平均颜色和平均位置**，符合后续使用需求。
+
+由于每个最终编号都实际存在，`if np.any(mask)` 正常情况下总会成立。保留它没有问题，也不必为了简化而改动这部分。
+
+**4. 建议把输入输出约定补到文档字符串中。**
+
+这是对外接口，调用者需要直接看清楚返回顺序，例如：
+
+```python
+"""RGB 图像的 SLIC 超像素分割。
+
+输入：
+    image：形状为 (H, W, 3) 的 RGB 数组。
+        支持 uint8 [0, 255] 或浮点 [0, 1]。
+    n_segments：期望超像素数量。
+    compactness：紧致度参数。
+    max_iter：正整数，聚类迭代次数。
+    min_size_factor：非负的小区域面积阈值比例。
+
+返回：
+    final_centers：(K_final, 5) 的浮点数组，
+        顺序为 [L, a, b, y, x]，颜色使用 Lab 尺度。
+    final_labels：(H, W) 的整数标签图，
+        标签连续编号为 0 到 K_final - 1。
+    final_sizes：(K_final,) 的整数数组，表示各区域像素数。
+
+三个返回值使用相同的区域编号；最终区域数可能与期望数量不同。
+"""
+```
+
+**补上参数检查后，这个顶层接口的主体结构可以保持不变。** 本次是静态检查，尚未实际运行；接下来适合用真实图像运行整个模块，检查标签覆盖、区域连通性和分割边界的可视化效果。
+

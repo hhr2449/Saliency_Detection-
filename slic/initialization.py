@@ -8,22 +8,35 @@ from __future__ import annotations
 import numpy as np
 
 def compute_gradient(lab: np.ndarray) -> np.ndarray:
-    """
-    计算 Lab 图像的梯度强度 
-    使用水平、竖直方向颜色差的平方和：
-    G = ||I[y+1, x] - I[y-1, x]||²
-      + ||I[y, x+1] - I[y, x-1]||²
+    """计算 Lab 图像的梯度平方强度。
+
+    内部像素使用中心差分：
+        dy = (I[y+1, x] - I[y-1, x]) / 2
+        dx = (I[y, x+1] - I[y, x-1]) / 2
+        G = ||dy||² + ||dx||²
+
+    边界使用单边差分。
+    某个空间维度长度为 1 时，该方向的导数取 0。
 
     返回 (H, W) 的 float64 数组。
     """
+    image = np.asarray(lab, dtype=np.float64)
     H, W, _ = lab.shape
-    grad = np.zeros((H, W), dtype=np.float64)
 
-    diff_y = lab[2:, 1:-1] - lab[:-2, 1:-1]
-    diff_x = lab[1:-1, 2:] - lab[1:-1, :-2]
+    diff_y = np.zeros_like(image)
+    diff_x = np.zeros_like(image)
     
-    grad[1:-1, 1:-1] = np.sum(diff_y**2 + diff_x**2, axis=-1)
-    return grad
+    if H > 1:
+        # 内部：中心差分；边界：单边差分。
+        diff_y[1:-1] = (image[2:] - image[:-2]) / 2.0
+        diff_y[0] = image[1] - image[0]
+        diff_y[-1] = image[-1] - image[-2]
+
+    if W > 1:
+        diff_x[:, 1:-1] = (image[:, 2:] - image[:, :-2]) / 2.0
+        diff_x[:, 0] = image[:, 1] - image[:, 0]
+        diff_x[:, -1] = image[:, -1] - image[:, -2]
+    return np.sum(diff_y**2 + diff_x**2, axis=-1)
 
 
 def initialize_centers(
@@ -51,11 +64,9 @@ def initialize_centers(
     n_cols = int(np.clip(round(n_segments / n_rows), 1, W))
 
     # 取每个网格单元的中心位置
-    ys = np.linspace(step / 2, H - step / 2, n_rows).astype(int)
-    xs = np.linspace(step / 2, W - step / 2, n_cols).astype(int)
-
-    grid_y, grid_x = np.meshgrid(ys, xs, indexing="ij")
-    colors = lab[grid_y, grid_x].reshape(-1, 3)
+    # 这里需要根据实际行列数计算
+    ys = ((np.arange(n_rows) + 0.5) * H / n_rows).astype(int)
+    xs = ((np.arange(n_cols) + 0.5) * W / n_cols).astype(int)
 
     centers = []
     for y in ys:
@@ -67,7 +78,7 @@ def initialize_centers(
             center[4] = x
             centers.append(center)
 
-    return centers, step
+    return np.asarray(centers, dtype=np.float64), step
 
 
 
@@ -88,7 +99,7 @@ def perturb_centers(
         x = int(adjusted[i, 4])
 
         min_grad = gradient[y, x]
-        best_y, best_x = y, x
+
 
         y_min = max(0, y - 1)
         y_max = min(H, y + 2)

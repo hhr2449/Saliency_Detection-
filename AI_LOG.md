@@ -1608,3 +1608,691 @@ print("左上角像素的 Lab 值：", lab[0, 0])
 预期 RGB 和 Lab 的形状一致，类型都是 `float32`；RGB 值位于 `[0, 1]`，Lab 使用自身的颜色尺度，允许 \(a,b\) 出现负值。
 
 这份代码目前完成的是**读取与颜色转换**。下一步可以开始 SLIC 的中心初始化：从 `lab.shape` 取得 \(H,W\)，根据期望区域数 \(K\) 计算间距 \(S\)，再生成初始中心的 \([L,a,b,x,y]\)。
+
+---
+
+## 第 16 次问答
+
+时间：2026-10-22 16:30:58 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+接下来我要进行区域中心的初始化
+按照论文中的算法，应该是要根据目标的中心点数进行均匀分配，但是我看到论文中有提到要避开明显边缘位置，请问这应该怎么做呢，需要进行边缘检测吗
+
+**助手（2026-10-22 16:33:37 +08:00）：**
+
+**这里需要计算局部梯度，用它衡量颜色变化的强弱；不必使用 Canny 之类的方法提取一张完整的边缘图。**
+
+论文的具体做法是：**先均匀放置中心，再在每个中心周围的 \(3\times3\) 邻域内，找到梯度最小的位置，把中心移动过去。** 这一步对应 §3.1，以及 Algorithm 1 的初始化部分。[SLIC 论文第 2—3 页](https://www.cs.jhu.edu/~ayuille1/JHUcourses/VisionAsBayesianInference2022/4/Achanta_SLIC_PAMI2012.pdf#page=2)
+
+**梯度可以理解为：某个位置附近的颜色变化有多剧烈。**
+
+例如，花朵内部相邻像素的颜色比较接近，梯度往往较小；花朵与草地交界处颜色变化明显，梯度往往较大。将初始中心放在局部变化较平缓的位置，可以减少边缘对初始化的影响。
+
+对于已经得到的 Lab 图像，可以分别计算沿水平方向和竖直方向的颜色变化。以内部像素为例，使用中心差分：
+
+\[
+g_x(y,x)=\frac{I_{\mathrm{Lab}}(y,x+1)-I_{\mathrm{Lab}}(y,x-1)}{2}
+\]
+
+\[
+g_y(y,x)=\frac{I_{\mathrm{Lab}}(y+1,x)-I_{\mathrm{Lab}}(y-1,x)}{2}
+\]
+
+这里的 \(I_{\mathrm{Lab}}(y,x)\) 是一个包含 \(L,a,b\) 的三维向量，所以 \(g_x\)、\(g_y\) 也各有三个分量。
+
+然后定义一个梯度强度：
+
+\[
+G(y,x)=\|g_x(y,x)\|_2^2+\|g_y(y,x)\|_2^2
+\]
+
+\(G\) 越小，说明附近的颜色变化越平缓。这是我们可以采用的一种具体梯度计算方式；论文要求寻找局部低梯度位置，但在这部分正文中没有展开这些计算细节。
+
+在 Python 中，可以使用 `np.gradient()` 实现：
+
+```python
+# lab 的形状为 (H, W, 3)，使用浮点类型。
+# 这里要求 H、W 都至少为 2。
+grad_y, grad_x = np.gradient(lab, axis=(0, 1))
+
+# 对 L、a、b 三个通道的变化平方求和。
+gradient = np.sum(
+    grad_x ** 2 + grad_y ** 2,
+    axis=2,
+)
+```
+
+这样得到的 `gradient` 是一个 **`(H, W)` 数组**，每个位置只有一个梯度强度值。`np.gradient()` 在内部使用中心差分，在边界使用单边差分。[NumPy 官方文档](https://numpy.org/doc/stable/reference/generated/numpy.gradient.html)
+
+接下来，对每个初始中心做一次小范围调整。假设中心位于 \((x_0,y_0)\)，附近的梯度值如下：
+
+```text
+ 8   15   90
+ 5  180  100
+ 2   12   80
+```
+
+原中心位于正中间，梯度为 `180`。左下角梯度最小，为 `2`，因此将中心移动到：
+
+\[
+x_{\mathrm{new}}=x_0-1,\qquad
+y_{\mathrm{new}}=y_0+1
+\]
+
+**移动位置后，还要同步更新中心的 Lab 颜色。** 新中心应为：
+
+\[
+C_k=
+\left[
+L(y_{\mathrm{new}},x_{\mathrm{new}}),
+a(y_{\mathrm{new}},x_{\mathrm{new}}),
+b(y_{\mathrm{new}},x_{\mathrm{new}}),
+x_{\mathrm{new}},
+y_{\mathrm{new}}
+\right]
+\]
+
+因此，初始化的执行顺序可以写成：
+
+1. 根据 \(H,W,K\) 计算中心间距 \(S\)。
+2. 按规则网格生成初始中心位置。
+3. 计算 Lab 图像的梯度强度图。
+4. 对每个中心，在附近 \(3\times3\) 范围内选择梯度最小的位置。
+5. 用调整后的位置及该位置的 Lab 值构成初始中心。
+6. 开始后续的像素分配与中心更新迭代。
+
+实现时注意三点：
+
+- **搜索范围只有 \(3\times3\)**，每个坐标方向最多移动一个像素，以保持中心分布大致均匀。
+- 邻域超出图像边界时，只检查图像内的有效位置。
+- 如果原中心已经是局部最小值，可以保留它；并列最小值也可以优先保留原位置，避免平坦区域中的无意义移动。
+
+这是初始化阶段的一次微调。后续迭代中的中心仍然由**所属像素的平均颜色和平均位置**更新。
+
+---
+
+## 第 17 次问答
+
+时间：2026-10-22 16:45:08 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+为什么要避开边缘、
+
+**助手（2026-10-22 16:46:20 +08:00）：**
+
+因为**边缘往往是两个不同区域的交界处，而初始中心最好落在某个区域内部，才能更好地代表这个区域的颜色。**
+
+比如，图像中有一块红色物体，旁边是蓝色背景：
+
+```text
+红 红 红 红 蓝 蓝 蓝
+红 红 红 红 蓝 蓝 蓝
+红 红 红 红 蓝 蓝 蓝
+           ↑
+         颜色交界处
+```
+
+如果初始中心恰好落在交界附近，会有两个问题：
+
+1. **中心颜色可能不够有代表性。** 真实图像中的边缘像素可能受到模糊、抗锯齿等影响，混合了两侧的颜色。这个像素的颜色既不能很好地代表红色物体，也不能很好地代表蓝色背景。
+2. **初始分配更容易受到交界处的影响。** SLIC 要用中心的颜色和位置计算距离。如果中心颜色不够有代表性，第一轮像素分配就可能不太合理，影响后续聚类。
+
+因此，我们在初始中心附近的 **\(3\times3\) 小邻域中寻找梯度最小的像素**，把中心移过去。梯度小，表示这个位置周围的颜色变化较小，通常更适合作为初始中心；这也有助于避开孤立的噪声点。
+
+这里有一个区别：**避开边缘的是“初始中心”，而最终超像素的边界恰恰希望尽量贴合图像边缘。** 中心落在颜色相对一致的区域内部，再通过颜色距离和空间距离进行聚类，更有利于形成这样的结果。
+
+这个调整只是改善初始化，并不能保证所有中心都完全避开边缘。之所以只在很小的邻域内移动，也是为了保留原来均匀布点的空间分布。
+
+---
+
+## 第 18 次问答
+
+时间：2026-10-22 16:47:58 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+所以我实现的时候应该对每个中心点邻域内的点计算梯度，然后把中心点移动到梯度最小的点处
+
+**助手（2026-10-22 16:48:26 +08:00）：**
+
+对，你的理解正确。**对每个初始中心，在它的 \(3\times3\) 邻域内比较各像素的梯度大小，然后将中心移到梯度最小的像素位置。**
+
+实现时可以先计算整幅图像的梯度大小图，再让每个中心查询自己的邻域，这样就不用重复计算梯度：
+
+```text
+计算整幅 Lab 图像的梯度大小图
+            ↓
+遍历均匀放置的初始中心
+            ↓
+取当前中心周围的 3×3 邻域（包括中心本身）
+            ↓
+找到邻域内梯度最小的像素
+            ↓
+用该像素的位置和 Lab 颜色初始化中心
+```
+
+注意这几个细节：
+
+- **颜色和位置都要更新。** 如果新位置是 `(y, x)`，新的中心就是：
+  ```python
+  L, a, b = lab[y, x]
+  center = [L, a, b, x, y]
+  ```
+  数组索引是 `[y, x]`，与你这里中心向量的坐标顺序 `[x, y]` 不同，注意保持一致。
+- **邻域不能超出图像边界。** 靠近边界时，只比较图像范围内的像素。
+- **如果原中心已经是梯度最小的位置，就可以不移动。** 多个位置并列最小时，也可以优先保留原中心，避免无意义的偏移。
+
+另外，这个操作**只在初始化时进行一次**。后面的迭代更新中心时，使用所属像素的平均颜色和平均位置，不再执行这一步。
+
+---
+
+## 第 19 次问答
+
+时间：2026-10-22 16:52:12 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""网格中心初始化及低梯度位置调整。
+
+中心统一使用 [L, a, b, y, x] 顺序。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+def compute_gradient(lab: np.ndarray) -> np.ndarray:
+    """
+    计算 Lab 图像的梯度强度 
+    使用水平、竖直方向颜色差的平方和：
+    G = ||I[y+1, x] - I[y-1, x]||²
+      + ||I[y, x+1] - I[y, x-1]||²
+
+    返回 (H, W) 的 float64 数组。
+    """
+    H, W, _ = lab.shape
+    grad = np.zeros((H, W), dtype=np.float64)
+
+    diff_y = lab[2:, 1:-1] - lab[:-2, 1:-1]
+    diff_x = lab[1:-1, 2:] - lab[1:-1, :-2]
+    
+    grad[1:-1, 1:-1] = np.sum(diff_y**2 + diff_x**2, axis=-1)
+    return grad
+
+
+def initialize_centers(
+    lab: np.ndarray,
+    n_segments: int,
+) -> tuple[np.ndarray, float]:
+    
+    """在规则网格中初始化中心。
+    参数：
+        lab：形状为 (H, W, 3) 的浮点 Lab 图像。
+        n_segments：期望超像素数量 K，满足 1 <= K <= H*W。
+
+    返回：
+        centers：(K0, 5) 的 float64 数组，顺序为 [L, a, b, y, x]。
+        step：参考间隔 S = sqrt(H*W/K)。
+    """
+    H, W = lab.shape[:2]
+    if not (1 <= n_segments <= H * W):
+        raise ValueError(f"n_segments ({n_segments}) 超出有效范围 [1, {H * W}]")
+
+    step = float(np.sqrt(H * W / n_segments))
+
+    # 计算行列数并截断在合法尺寸内
+    n_rows = int(np.clip(round(H / step), 1, H))
+    n_cols = int(np.clip(round(n_segments / n_rows), 1, W))
+
+    # 取每个网格单元的中心位置
+    ys = np.linspace(step / 2, H - step / 2, n_rows).astype(int)
+    xs = np.linspace(step / 2, W - step / 2, n_cols).astype(int)
+
+    grid_y, grid_x = np.meshgrid(ys, xs, indexing="ij")
+    colors = lab[grid_y, grid_x].reshape(-1, 3)
+
+    centers = []
+    for y in ys:
+        for x in xs:
+            # 顺序: [L, a, b, y, x]
+            center = np.zeros(5, dtype=np.float64)
+            center[:3] = lab[y, x]
+            center[3] = y
+            center[4] = x
+            centers.append(center)
+
+    return centers, step
+
+
+
+
+def perturb_centers(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    gradient: np.ndarray,
+) -> np.ndarray:
+    """
+    将中心移动到 3x3 邻域内梯度最小的位置。
+    """
+    H, W = lab.shape[:2]
+    adjusted = centers.copy()
+
+    for i in range(len(adjusted)):
+        y = int(adjusted[i, 3])
+        x = int(adjusted[i, 4])
+
+        min_grad = gradient[y, x]
+        best_y, best_x = y, x
+
+        y_min = max(0, y - 1)
+        y_max = min(H, y + 2)
+        x_min = max(0, x - 1)
+        x_max = min(W, x + 2)
+
+        # 找 3x3 窗口内最小梯度的坐标
+        local_grad = gradient[y_min:y_max, x_min:x_max]
+        min_idx = np.unravel_index(np.argmin(local_grad), local_grad.shape)
+
+        cand_y = y_min + min_idx[0]
+        cand_x = x_min + min_idx[1]
+
+        # 如果找到更小梯度的位置就更新
+        if gradient[cand_y, cand_x] < min_grad:
+            adjusted[i, 3] = cand_y
+            adjusted[i, 4] = cand_x
+            adjusted[i, :3] = lab[cand_y, cand_x]
+
+    return adjusted
+```
+
+我尝试实现了一下，请你检查是否存在问题
+
+**助手（2026-10-22 16:53:58 +08:00）：**
+
+整体流程是对的，尤其是 `perturb_centers()`：**搜索 \(3\times3\) 邻域、只在梯度严格变小时移动、同时更新颜色和位置**，这几处都符合我们前面讨论的逻辑。统一采用 `[L, a, b, y, x]` 也没有问题，后续保持一致即可。
+
+不过，目前代码里有 **3 个需要修改的问题**。
+
+**1. `initialize_centers()` 返回的是列表，后续却按二维数组使用。**
+
+你现在初始化的是：
+
+```python
+centers = []
+```
+
+然后直接返回：
+
+```python
+return centers, step
+```
+
+所以得到的是一个 Python 列表，而 `perturb_centers()` 中使用了：
+
+```python
+adjusted[i, 3]
+```
+
+列表不支持这种二维索引，会报错。此外，列表的 `.copy()` 是浅拷贝，其中的各个中心数组仍与原列表共用。
+
+在返回前转换成 NumPy 数组即可解决这两个问题：
+
+```python
+return np.asarray(centers, dtype=np.float64), step
+```
+
+这样返回类型也和你的类型标注、文档说明一致。
+
+**2. 梯度图的边界被留成了 0，会错误地吸引中心。**
+
+你的梯度计算只覆盖内部：
+
+```python
+grad[1:-1, 1:-1] = ...
+```
+
+但最外侧一圈保持初始化时的 `0`。这相当于告诉后续程序：**图像边界处的梯度最小**，即使那里实际颜色变化非常剧烈。
+
+当某个中心的邻域包含边界时，就可能错误地移动过去。高度或宽度小于 3 时，这个问题更明显，因为根本没有内部像素可供计算。
+
+可以在内部使用中心差分，在边界使用单边差分：
+
+```python
+def compute_gradient(lab: np.ndarray) -> np.ndarray:
+    """计算 Lab 图像的梯度平方强度，返回 (H, W) 的 float64 数组。"""
+    image = np.asarray(lab, dtype=np.float64)
+    H, W = image.shape[:2]
+
+    diff_y = np.zeros_like(image)
+    diff_x = np.zeros_like(image)
+
+    if H > 1:
+        # 内部：中心差分；边界：单边差分。
+        diff_y[1:-1] = (image[2:] - image[:-2]) / 2.0
+        diff_y[0] = image[1] - image[0]
+        diff_y[-1] = image[-1] - image[-2]
+
+    if W > 1:
+        diff_x[:, 1:-1] = (image[:, 2:] - image[:, :-2]) / 2.0
+        diff_x[:, 0] = image[:, 1] - image[:, 0]
+        diff_x[:, -1] = image[:, -1] - image[:, -2]
+
+    return np.sum(diff_y**2 + diff_x**2, axis=-1)
+```
+
+这里也处理了只有一行或一列的情况：没有变化方向的导数取 0。
+
+你原来的内部差分**没有除以 2，本身不是问题**：在内部像素之间比较时，只是把所有梯度平方值统一放大了 4 倍，不影响最小值的位置。上面除以 2，是为了与边界单边差分的尺度保持一致。
+
+另外，原代码虽然输出数组是 `float64`，但差分运算仍使用输入数组的数据类型。先转换为 `float64`，可以让运算精度与输出约定一致。
+
+**3. 网格位置应该根据实际行列数计算，而不是继续使用 `step / 2` 作为两端偏移。**
+
+这两行在一些情况下会产生不合理的位置：
+
+```python
+ys = np.linspace(step / 2, H - step / 2, n_rows).astype(int)
+xs = np.linspace(step / 2, W - step / 2, n_cols).astype(int)
+```
+
+因为 `n_rows`、`n_cols` 已经经过取整，实际网格单元的高度和宽度分别是：
+
+\[
+s_y=\frac{H}{n_{\mathrm{rows}}},\qquad
+s_x=\frac{W}{n_{\mathrm{cols}}}
+\]
+
+它们不一定等于理论参考间隔 `step`。
+
+例如，图像为 `100 × 200`，只需要一个中心时：
+
+```python
+step ≈ 141.4
+n_rows = 1
+n_cols = 1
+```
+
+原来的代码会把中心放在大约 `(70, 70)`，而不是图像中间的 `(50, 100)`。对于更狭长的图像，甚至可能产生越界坐标。
+
+根据实际网格单元取中心更合适：
+
+```python
+ys = ((np.arange(n_rows) + 0.5) * H / n_rows).astype(int)
+xs = ((np.arange(n_cols) + 0.5) * W / n_cols).astype(int)
+```
+
+含义就是：将高度划分为 `n_rows` 份、宽度划分为 `n_cols` 份，分别取每份的中间位置。
+
+你的初始化函数可以改为：
+
+```python
+def initialize_centers(
+    lab: np.ndarray,
+    n_segments: int,
+) -> tuple[np.ndarray, float]:
+    """在规则网格中初始化中心。
+
+    返回：
+        centers：(K0, 5) 的 float64 数组，顺序为 [L, a, b, y, x]。
+        step：参考间隔 S = sqrt(H*W/K)。
+    """
+    H, W = lab.shape[:2]
+
+    if isinstance(n_segments, (bool, np.bool_)) or not isinstance(
+        n_segments, (int, np.integer)
+    ):
+        raise TypeError("n_segments 必须是整数。")
+
+    if not (1 <= n_segments <= H * W):
+        raise ValueError(
+            f"n_segments ({n_segments}) 超出有效范围 [1, {H * W}]"
+        )
+
+    step = float(np.sqrt(H * W / n_segments))
+
+    n_rows = int(np.clip(round(H / step), 1, H))
+    n_cols = int(np.clip(round(n_segments / n_rows), 1, W))
+
+    # 根据实际网格行列数，取各单元的中心位置。
+    ys = ((np.arange(n_rows) + 0.5) * H / n_rows).astype(int)
+    xs = ((np.arange(n_cols) + 0.5) * W / n_cols).astype(int)
+
+    centers = []
+    for y in ys:
+        for x in xs:
+            center = np.zeros(5, dtype=np.float64)
+            center[:3] = lab[y, x]
+            center[3] = y
+            center[4] = x
+            centers.append(center)
+
+    return np.asarray(centers, dtype=np.float64), step
+```
+
+这里实际中心数是 `K0 = n_rows * n_cols`，可能与目标 `n_segments` 略有差异，符合“期望区域数”的含义。后续分配数组、遍历中心时，应使用 `len(centers)` 作为实际中心数。
+
+还有两处可以顺手整理：
+
+- `initialize_centers()` 中的 `grid_y`、`grid_x` 和 `colors` 没有被使用，可以删除。
+- `perturb_centers()` 中的 `best_y, best_x = y, x` 没有被使用，可以删除。其余主体逻辑可以保留。
+
+修正之后，调用顺序就是：
+
+```python
+gradient = compute_gradient(lab)
+centers, step = initialize_centers(lab, n_segments=200)
+centers = perturb_centers(lab, centers, gradient)
+```
+
+以上是根据你贴出的代码做的静态检查，尚未实际运行。完成修改后，建议先把初始化后的中心位置画在图像上，检查它们是否大致均匀分布、是否都在图像范围内，再继续写像素分配和中心更新。
+
+---
+
+## 第 20 次问答
+
+时间：2026-10-22 16:56:34 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""网格中心初始化及低梯度位置调整。
+
+中心统一使用 [L, a, b, y, x] 顺序。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+def compute_gradient(lab: np.ndarray) -> np.ndarray:
+    """
+    计算 Lab 图像的梯度强度 
+    使用水平、竖直方向颜色差的平方和：
+    G = ||I[y+1, x] - I[y-1, x]||²
+      + ||I[y, x+1] - I[y, x-1]||²
+
+    返回 (H, W) 的 float64 数组。
+    """
+    image = np.asarray(lab, dtype=np.float64)
+    H, W, _ = lab.shape
+    grad = np.zeros((H, W), dtype=np.float64)
+
+    diff_y = lab[2:, 1:-1] - lab[:-2, 1:-1]
+    diff_x = lab[1:-1, 2:] - lab[1:-1, :-2]
+    
+    if H > 1:
+        # 内部：中心差分；边界：单边差分。
+        diff_y[1:-1] = (image[2:] - image[:-2]) / 2.0
+        diff_y[0] = image[1] - image[0]
+        diff_y[-1] = image[-1] - image[-2]
+
+    if W > 1:
+        diff_x[:, 1:-1] = (image[:, 2:] - image[:, :-2]) / 2.0
+        diff_x[:, 0] = image[:, 1] - image[:, 0]
+        diff_x[:, -1] = image[:, -1] - image[:, -2]
+    return np.sum(diff_y**2 + diff_x**2, axis=-1)
+
+
+def initialize_centers(
+    lab: np.ndarray,
+    n_segments: int,
+) -> tuple[np.ndarray, float]:
+    
+    """在规则网格中初始化中心。
+    参数：
+        lab：形状为 (H, W, 3) 的浮点 Lab 图像。
+        n_segments：期望超像素数量 K，满足 1 <= K <= H*W。
+
+    返回：
+        centers：(K0, 5) 的 float64 数组，顺序为 [L, a, b, y, x]。
+        step：参考间隔 S = sqrt(H*W/K)。
+    """
+    H, W = lab.shape[:2]
+    if not (1 <= n_segments <= H * W):
+        raise ValueError(f"n_segments ({n_segments}) 超出有效范围 [1, {H * W}]")
+
+    step = float(np.sqrt(H * W / n_segments))
+
+    # 计算行列数并截断在合法尺寸内
+    n_rows = int(np.clip(round(H / step), 1, H))
+    n_cols = int(np.clip(round(n_segments / n_rows), 1, W))
+
+    # 取每个网格单元的中心位置
+    # 这里需要根据实际行列数计算
+    ys = ((np.arange(n_rows) + 0.5) * H / n_rows).astype(int)
+    xs = ((np.arange(n_cols) + 0.5) * W / n_cols).astype(int)
+
+    centers = []
+    for y in ys:
+        for x in xs:
+            # 顺序: [L, a, b, y, x]
+            center = np.zeros(5, dtype=np.float64)
+            center[:3] = lab[y, x]
+            center[3] = y
+            center[4] = x
+            centers.append(center)
+
+    return np.asarray(centers, dtype=np.float64), step
+
+
+
+
+def perturb_centers(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    gradient: np.ndarray,
+) -> np.ndarray:
+    """
+    将中心移动到 3x3 邻域内梯度最小的位置。
+    """
+    H, W = lab.shape[:2]
+    adjusted = centers.copy()
+
+    for i in range(len(adjusted)):
+        y = int(adjusted[i, 3])
+        x = int(adjusted[i, 4])
+
+        min_grad = gradient[y, x]
+
+
+        y_min = max(0, y - 1)
+        y_max = min(H, y + 2)
+        x_min = max(0, x - 1)
+        x_max = min(W, x + 2)
+
+        # 找 3x3 窗口内最小梯度的坐标
+        local_grad = gradient[y_min:y_max, x_min:x_max]
+        min_idx = np.unravel_index(np.argmin(local_grad), local_grad.shape)
+
+        cand_y = y_min + min_idx[0]
+        cand_x = x_min + min_idx[1]
+
+        # 如果找到更小梯度的位置就更新
+        if gradient[cand_y, cand_x] < min_grad:
+            adjusted[i, 3] = cand_y
+            adjusted[i, 4] = cand_x
+            adjusted[i, :3] = lab[cand_y, cand_x]
+
+    return adjusted
+```
+
+我修改了一下，这样是否存在问题
+
+**助手（2026-10-22 16:57:05 +08:00）：**
+
+还有一处需要修改：**`compute_gradient()` 中保留了旧版的 `diff_y`、`diff_x` 初始化，导致它们的尺寸与后面的赋值不匹配。** `initialize_centers()` 的网格位置和数组返回值已经改对了，`perturb_centers()` 的逻辑也没有明显问题。
+
+你现在这两行：
+
+```python
+diff_y = lab[2:, 1:-1] - lab[:-2, 1:-1]
+diff_x = lab[1:-1, 2:] - lab[1:-1, :-2]
+```
+
+对于正常尺寸的图像，得到的是 `(H-2, W-2, 3)` 数组。但后面的代码是按完整的 `(H, W, 3)` 数组来填写梯度的，例如：
+
+```python
+diff_y[1:-1] = (image[2:] - image[:-2]) / 2.0
+```
+
+左侧形状是 `(H-4, W-2, 3)`，右侧是 `(H-2, W, 3)`，因此会发生形状不匹配的错误。
+
+**将这两行替换为完整尺寸的零数组即可：**
+
+```python
+diff_y = np.zeros_like(image)
+diff_x = np.zeros_like(image)
+```
+
+同时删除不再使用的 `grad`，并把文档中的公式同步修改为包含 `/ 2` 的中心差分。完整的函数如下：
+
+```python
+def compute_gradient(lab: np.ndarray) -> np.ndarray:
+    """计算 Lab 图像的梯度平方强度。
+
+    内部像素使用中心差分：
+        dy = (I[y+1, x] - I[y-1, x]) / 2
+        dx = (I[y, x+1] - I[y, x-1]) / 2
+        G = ||dy||² + ||dx||²
+
+    边界使用单边差分。
+    某个空间维度长度为 1 时，该方向的导数取 0。
+
+    返回 (H, W) 的 float64 数组。
+    """
+    image = np.asarray(lab, dtype=np.float64)
+    H, W = image.shape[:2]
+
+    diff_y = np.zeros_like(image)
+    diff_x = np.zeros_like(image)
+
+    if H > 1:
+        # 竖直方向：内部使用中心差分，上下边界使用单边差分。
+        diff_y[1:-1] = (image[2:] - image[:-2]) / 2.0
+        diff_y[0] = image[1] - image[0]
+        diff_y[-1] = image[-1] - image[-2]
+
+    if W > 1:
+        # 水平方向：内部使用中心差分，左右边界使用单边差分。
+        diff_x[:, 1:-1] = (image[:, 2:] - image[:, :-2]) / 2.0
+        diff_x[:, 0] = image[:, 1] - image[:, 0]
+        diff_x[:, -1] = image[:, -1] - image[:, -2]
+
+    return np.sum(diff_y**2 + diff_x**2, axis=-1)
+```
+
+另外，`initialize_centers()` 目前只检查了 `n_segments` 的取值范围，**没有检查它是否为整数**。例如 `200.5` 也会通过检查。如果希望函数严格符合参数约定，可以在范围检查之前补上：
+
+```python
+if isinstance(n_segments, (bool, np.bool_)) or not isinstance(
+    n_segments, (int, np.integer)
+):
+    raise TypeError("n_segments 必须是整数。")
+```
+
+这次是对所贴代码的静态检查。就当前这版而言，首先需要修复的是梯度数组尺寸；其他两个函数可以保留当前结构。
+

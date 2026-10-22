@@ -63,6 +63,9 @@ def initialize_centers(
     n_rows = int(np.clip(round(H / step), 1, H))
     n_cols = int(np.clip(round(n_segments / n_rows), 1, W))
 
+    # 列数确定后，再根据目标数量调整行数。
+    n_rows = int(np.clip(round(n_segments / n_cols), 1, H))
+
     # 取每个网格单元的中心位置
     # 这里需要根据实际行列数计算
     ys = ((np.arange(n_rows) + 0.5) * H / n_rows).astype(int)

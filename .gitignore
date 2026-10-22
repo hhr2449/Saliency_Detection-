@@ -1,0 +1,44 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+venv/
+env/
+.conda/
+
+# 本地环境变量
+.env
+.env.*
+!.env.example
+
+# 测试与覆盖率缓存
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# 代码检查缓存
+.ruff_cache/
+.mypy_cache/
+
+# 打包产物
+build/
+dist/
+*.egg-info/
+
+# 实验生成结果
+/outputs/
+/results/
+/logs/
+
+# 编辑器临时文件
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db

@@ -92,7 +92,10 @@ def merge_small_components(
                         boundary_counts[nb] = boundary_counts.get(nb, 0) + 1
 
         # 找出现次数最多的邻居
-        target = max(boundary_counts, key=boundary_counts.get)
+        target = max(
+            boundary_counts,
+            key=lambda label: (boundary_counts[label], -label),
+        )
 
         # 把当前块合并进目标邻居，并把当前块大小置 0
         adjusted[mask] = target

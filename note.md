@@ -236,9 +236,19 @@ final_labels    # (H, W)，连续编号的超像素标签图
 
 
 
+### 5. 对外接口
 
+```python
+centers, labels, sizes = slic(
+    image=rgb,
+    n_segments=200,
+    compactness=10.0,
+    max_iter=10,
+    min_size_factor=0.25,
+)
+```
 
-
+使用slic函数作为这个模块的对外接口，输入图像数组和必要的参数，函数完成SLIC然后输出中心点数组，label标记数组等
 
 
 

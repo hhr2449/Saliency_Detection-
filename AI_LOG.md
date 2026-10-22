@@ -2859,3 +2859,1200 @@ assert np.isfinite(centers).all()
 
 **这次结论基于对所贴代码的静态检查，尚未实际运行。** 当前无需继续修改这两个函数的主体逻辑，下一步可以运行完整迭代、查看初步分割结果，然后进行连通性处理。
 
+---
+
+## 第 24 次问答
+
+时间：2026-10-22 19:58:19 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+接下来按照论文中的算法，应该进行连通性处理。我们上一步已经得到了标签图，现在应该要将这个标签图中不连通的部分合并。那是不是应该先划分区域，将联通的像素块找到
+
+**助手（2026-10-22 19:59:05 +08:00）：**
+
+**对，第一步就是在标签图中找出各个连通块。** 不过要注意：这里找的是**“标签相同，而且在空间上连通”的像素块**，不能只看像素是否相邻。
+
+例如下面的标签图：
+
+```text
+0 0 1 1 1
+0 0 1 0 1
+2 2 1 1 1
+2 2 2 1 1
+```
+
+标签 `0` 出现在两个地方：
+
+- 左上角的 4 个像素连成一块。
+- 右侧的单个 `0` 与左上角不连通，是另一块。
+
+因此，虽然它们的标签都是 `0`，**在连通性处理时，应先把它们识别为两个独立的连通块。**
+
+可以使用**四邻域**来定义连通，也就是只检查一个像素的上、下、左、右：
+
+```text
+    上
+左  当前  右
+    下
+```
+
+仅仅对角相接的像素，在四邻域定义下不算连通。整个处理过程中保持这一约定一致即可。
+
+你可以把连通性处理拆成下面三个步骤。
+
+**1. 找到所有连通块，为每块分配独立编号。**
+
+遍历标签图，从一个尚未访问的像素出发，用 BFS 或 DFS 搜索：
+
+- 邻居与当前像素的**原始标签相同**。
+- 邻居还没有被访问。
+
+满足这两个条件，就将邻居加入当前连通块，继续搜索，直到找完这一块。
+
+得到的结果可以包括：
+
+```python
+component_map   # (H, W)，每个像素所属的连通块编号
+component_sizes  # 每个连通块的像素数量
+```
+
+这里要区分两个编号：
+
+- 原始标签：像素属于哪个聚类中心。
+- 连通块编号：像素属于哪个独立的连通区域。
+
+**同一个原始标签，可以对应多个连通块。**
+
+**2. 将过小的连通块合并到实际相邻的区域。**
+
+找到连通块后，不是把所有同标签的块强行连接起来，而是检查每块的面积。对于过小的碎片，将它并入与它接壤的区域。
+
+例如上面的孤立 `0` 被标签 `1` 包围，就可以合并到周围的 `1` 中：
+
+```text
+0 0 1 1 1
+0 0 1 1 1
+2 2 1 1 1
+2 2 2 1 1
+```
+
+你可以设置一个小区域阈值，例如：
+
+\[
+T=\max\left(1,\left\lfloor \eta\frac{HW}{K_0}\right\rfloor\right)
+\]
+
+其中 \(K_0\) 是初始化后的实际中心数，\(\eta\) 是比例参数，例如先取 `0.25`。**这里的阈值和比例是我们选择的实现细节，不是必须照搬的论文固定参数。**
+
+如果一个小块与多个区域相邻，可以选择与它**共享边界最长**的区域作为合并目标。合并时必须确认两个区域实际相邻，才能保证合并后的区域仍然连通。
+
+对于同标签下的多个较大连通块，可以将它们保留为独立的超像素，不必为了恢复原标签而强行合并。
+
+**3. 重新连续编号。**
+
+合并结束后，将最终区域重新编号为：
+
+```text
+0, 1, 2, ..., K_final - 1
+```
+
+最终需要满足的是：
+
+> **每一个标签只对应一个连通区域，每一个像素都属于某个区域。**
+
+所以，你现在可以先写“连通块提取”这个函数：**输入原始标签图，输出独立的连通块标签图以及每块的面积。** 这一步完成后，再处理小块的邻接关系和合并。
+
+---
+
+## 第 25 次问答
+
+时间：2026-10-22 20:02:36 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+我明白了，我们应该保留两种编号：一种是原始的标签编号，一种是联通区域编号。找连通块可以使用搜索，搜索的每一轮都从一个为访问的像素点触发，然后向上下左右相同原始标签的点扩展，直到无法扩展为止，这些点都标上同一个联通区域编号
+
+**助手（2026-10-22 20:03:01 +08:00）：**
+
+**对，你的理解正确。** 每一轮搜索都从一个**未访问**的像素出发，只向上下左右中“原始标签相同且未访问”的像素扩展。搜索到的全部像素使用同一个连通区域编号；这一轮结束后，再寻找下一个未访问的像素，开始新的连通块。
+
+实现时可以保留两张图：
+
+```python
+labels          # 原始聚类标签图，搜索过程中保持不变
+component_map   # 连通区域编号图，初始值全部设为 -1
+```
+
+其中，`component_map` 还可以兼任访问标记：
+
+- `component_map[y, x] == -1`：尚未访问。
+- `component_map[y, x] >= 0`：已经归入某个连通块。
+
+因此，不一定需要单独创建 `visited` 数组。
+
+具体过程可以写成这样的伪代码：
+
+```text
+component_map 全部初始化为 -1
+当前连通块编号设为 0
+创建面积列表
+
+遍历图像中的每个像素：
+    如果该像素已经访问：
+        跳过
+
+    记录起点的原始标签
+    将起点加入队列，并立即标记当前连通块编号
+    当前块面积设为 0
+
+    当队列不为空：
+        取出一个像素
+        当前块面积加 1
+
+        检查它的上下左右邻居：
+            如果邻居在图像范围内，
+            且尚未访问，
+            且原始标签与起点相同：
+                标记为当前连通块编号
+                加入队列
+
+    保存当前块面积
+    连通块编号加 1
+```
+
+注意一个容易出错的细节：**像素加入队列时就标记编号，不要等到取出时才标记。** 否则，同一个像素可能被多个邻居重复加入队列，造成重复处理甚至面积统计错误。
+
+最后返回 `component_map` 和各连通块的面积即可。这里的原始标签图主要用于限制搜索范围；后续判断相邻关系和合并碎片时，就可以基于连通块编号图进行。
+
+---
+
+## 第 26 次问答
+
+时间：2026-10-22 20:03:32 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+那是不是同时也就可以算出联通区域的面积了
+
+**助手（2026-10-22 20:03:45 +08:00）：**
+
+**对，搜索连通块的同时，就可以统计它的面积。** 这里的面积就是这个连通块包含的像素数量。
+
+每开始一个新的连通块，先设置：
+
+```python
+area = 0
+```
+
+搜索时，每从队列中取出一个像素，就执行：
+
+```python
+area += 1
+```
+
+这一轮搜索结束后，`area` 就是当前连通块的面积，将它保存下来：
+
+```python
+component_sizes.append(area)
+```
+
+只要按照前面说的，**在像素入队时立即标记为已访问**，就能保证每个像素只入队、出队一次，不会重复计数。
+
+这样，函数最终可以返回：
+
+```python
+return component_map, np.asarray(component_sizes, dtype=np.int64)
+```
+
+其中 `component_sizes[k]` 就对应连通块编号 `k` 的面积。完成后还可以检查：
+
+```python
+assert component_sizes.sum() == labels.size
+```
+
+因为所有连通块应当覆盖整幅图像，所以它们的面积总和必须等于图像的总像素数。
+
+---
+
+## 第 27 次问答
+
+时间：2026-10-22 20:04:42 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+然后我们设定一个面积阈值，小于这个阈值的联通区域就是要进行合并的。这里我想考虑两个问题：1. 这个阈值如何确定 2. 如果合并，应该合并到哪个区域中
+
+**助手（2026-10-22 20:05:38 +08:00）：**
+
+对，接下来就是确定**“多小算碎片”**以及**“碎片并入哪个相邻区域”**。这两项可以作为连通性后处理的具体实现规则。
+
+**1. 面积阈值：根据期望的超像素面积按比例确定。**
+
+不建议直接固定为“少于 20 个像素”，因为图像尺寸和目标超像素数量改变后，这个值的意义也会变化。
+
+可以先计算平均参考面积：
+
+\[
+A_{\mathrm{ref}}=\frac{HW}{K_0}
+\]
+
+这里 \(K_0\) 是初始化后的实际中心数，也就是 `len(centers)`。然后设定：
+
+\[
+T=\max\left(1,\left\lfloor \eta A_{\mathrm{ref}}\right\rfloor\right)
+\]
+
+其中 \(\eta\) 控制允许保留多小的区域，**第一版可以先取 `0.25`**：
+
+```python
+reference_area = labels.size / n_centers
+min_size = max(1, int(0.25 * reference_area))
+```
+
+例如，图像大小为 `200 × 300`，实际初始化了 `200` 个中心：
+
+\[
+A_{\mathrm{ref}}=\frac{200\times300}{200}=300
+\]
+
+那么阈值就是 `75`，面积小于 `75` 的连通块需要考虑合并。
+
+- 比例较小：保留更多细小区域，但也可能留下更多碎片。
+- 比例较大：合并更积极，但可能丢失细小结构。
+
+**这里的 `0.25` 是我们选择的实现参数，不应在报告中写成论文规定的固定值。** 另外，分母使用初始化中心数，不使用提取出来的连通块总数；否则碎片越多，算出的参考面积反而越小，会削弱清理碎片的效果。
+
+**2. 合并目标：先限制为真正相邻的区域，再选择共享边界最长的一个。**
+
+建议你的第一版采用这个规则：
+
+> **只考虑与当前小区域四邻接的区域，优先合并到共享边界最长的区域；如果并列，选择编号较小者。**
+
+四邻接保证两个区域合并以后仍然连通。共享边界长度可以通过统计像素之间的接触边数得到。
+
+例如，小块 `A` 与周围区域的接触情况为：
+
+```text
+B B C
+B A C
+B B C
+```
+
+中心 `A` 的四条边中：
+
+- 上、下、左与 `B` 接触，共 `3` 条边。
+- 右侧与 `C` 接触，共 `1` 条边。
+
+所以将 `A` 合并到 `B`。
+
+统计时，可以遍历小块中的每个像素，检查上下左右邻居。只要邻居属于其他区域，就给对应区域的接触边数加一。**统计的是接触边数，不是邻接区域的像素总数。**
+
+这种方法只需要连通块图和面积信息，容易实现，也容易检查。以后如果想把颜色信息考虑进来，可以在共享边界长度并列时，优先选择平均 Lab 颜色更接近的区域；第一版不必增加这一层。
+
+**3. 合并过程中，要使用更新后的面积和区域关系。**
+
+这一点很重要。例如：
+
+```text
+A 面积 20
+B 面积 60
+阈值 75
+```
+
+如果把 `A` 合并到 `B`，那么 `B` 的面积变成 `80`，已经不需要继续作为小区域合并。
+
+因此，不能始终根据最初统计的面积判断。每次合并都需要：
+
+```text
+把源区域的像素改为目标区域编号
+目标区域面积 += 源区域面积
+源区域标记为不再存在
+```
+
+然后基于当前标签图判断后续区域的相邻关系。为了让结果可重复，可以每次选择**当前面积最小的小区域**进行处理，面积并列时按编号选择。顺序会影响最终结果，所以固定规则是有意义的。
+
+对于你的第一版，可以采用下面这一套完整规则：
+
+```text
+根据 HW / K0 设置面积阈值
+            ↓
+找到当前面积小于阈值的区域
+            ↓
+选择其中面积最小的一块
+            ↓
+统计它与各相邻区域的共享边界长度
+            ↓
+合并到共享边界最长的区域
+            ↓
+更新标签图和区域面积
+            ↓
+重复，直到没有小区域需要合并
+            ↓
+将剩余区域重新连续编号
+```
+
+如果整个图像只剩一个区域，就直接保留它，不再寻找合并目标。
+
+这些是我们为连通性后处理选定的具体规则。这样实现后，每次都只合并实际相邻的连通区域，最终就能保证**每个标签对应一个连通区域**，同时清理掉过小的碎片。
+
+---
+
+## 第 28 次问答
+
+时间：2026-10-22 20:07:44 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+那这个阈值参数是不是需要完成后测试的
+
+**助手（2026-10-22 20:08:09 +08:00）：**
+
+**对，这个阈值比例 \(\eta\) 需要在实现完成后通过实验检查是否合适。** 可以先用 `0.25` 跑通整个流程，再根据结果决定是否调整，不必现在就确定最终值。
+
+建议将它作为可调参数，例如：
+
+```python
+min_size_factor = 0.25
+min_size = max(1, int(min_size_factor * labels.size / n_centers))
+```
+
+测试时，保持同一幅图像、期望超像素数、紧致度和迭代次数不变，只改变这个比例，例如比较 `0.1`、`0.25`、`0.5`，重点观察：
+
+- **碎片是否得到清理**：是否还存在很多零散的小区域。
+- **细小结构是否被过度合并**：例如细长物体或较小目标的边界是否被破坏。
+- **最终超像素数量变化是否过大**：如果大量区域被合并，可能说明阈值偏大，也可能需要检查前面的聚类效果。
+
+另外，要区分两件事：**每个标签是否连通，是代码必须满足的正确性要求；阈值选多大，是影响分割效果的参数选择。** 即使阈值很小，由于我们已经为独立连通块分配了不同编号，最终也应该保证每个标签对应一个连通区域。
+
+等整个显著性检测流程完成后，还可以再检查不同阈值是否明显影响最终显著图。最终参数最好在一组具有不同内容的图像上比较后确定，避免只针对某一张图片调整。
+
+---
+
+## 第 29 次问答
+
+时间：2026-10-22 20:08:16 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+请你归纳一下这部分的处理流程
+
+**助手（2026-10-22 20:08:59 +08:00）：**
+
+这部分是 **SLIC 的连通性后处理**：输入聚类得到的标签图，先识别独立连通块，再合并过小的碎片，最后输出每个标签都对应一个连通区域的超像素标签图。
+
+```mermaid
+flowchart TD
+    A["输入原始标签图 labels<br/>实际初始中心数 K0、阈值比例 η"] --> B["四邻域搜索<br/>提取原始标签相同的连通块"]
+    B --> C["给每个连通块分配独立编号<br/>同时统计面积"]
+    C --> D["计算面积阈值<br/>T = max(1, floor(η × H × W / K0))"]
+    D --> E{"是否存在面积小于 T 的区域<br/>且当前不止一个区域？"}
+    E -- 是 --> F["选择当前面积最小的小区域"]
+    F --> G["统计与各相邻区域的共享边界长度"]
+    G --> H["合并到共享边界最长的区域"]
+    H --> I["更新区域编号图和面积"]
+    I --> E
+    E -- 否 --> J["对剩余区域重新连续编号"]
+    J --> K["输出连通的超像素标签图"]
+```
+
+**1. 提取连通块，同时统计面积。**
+
+保留两张图：
+
+- `labels`：原始聚类标签图，提取连通块时保持不变。
+- `component_map`：连通块编号图，初始值为 `-1`，同时作为访问标记。
+
+遍历所有像素，每遇到一个未访问的像素，就开始一次 BFS 或 DFS。只向**原始标签相同且未访问的上下左右邻居**扩展。
+
+搜索到的像素统一标记为当前连通块编号，并统计像素数量作为面积。**在像素加入搜索队列时立即标记**，避免重复加入和重复计数。
+
+这一步得到：
+
+```python
+component_map       # (H, W)，每个像素所属的独立连通块编号
+component_sizes     # 第 k 项是连通块 k 的像素数量
+```
+
+同一个原始标签下，如果存在多个互不连通的部分，它们此时已经有了不同的连通块编号。
+
+**2. 根据参考面积设置小区域阈值。**
+
+设初始化后的实际中心数为 \(K_0\)，参考面积为：
+
+\[
+A_{\mathrm{ref}}=\frac{HW}{K_0}
+\]
+
+面积阈值为：
+
+\[
+T=\max\left(1,\left\lfloor\eta A_{\mathrm{ref}}\right\rfloor\right)
+\]
+
+```python
+min_size = max(1, int(min_size_factor * labels.size / n_centers))
+```
+
+可以先令 `min_size_factor = 0.25`，之后通过实验调整。它是我们选定的后处理参数，不是论文规定的固定值。面积**严格小于** `min_size` 的区域作为待合并对象。
+
+**3. 将小区域逐个合并到相邻区域。**
+
+采用我们前面确定的规则：
+
+- 每次选择**当前面积最小**的小区域，面积相同时选择编号较小者。
+- 检查其上下左右接壤的区域，统计与各区域的**共享边界长度**。
+- 合并到共享边界最长的区域；长度相同时选择编号较小者。
+- 只能合并到实际相邻的区域，保证合并结果仍然连通。
+
+这里的共享边界长度，就是两个区域之间相邻像素的接触边数。
+
+**4. 每次合并后更新状态，继续判断。**
+
+假设将区域 `A` 合并到区域 `B`：
+
+```text
+把 A 的像素编号改为 B
+B 的面积增加 A 的面积
+A 标记为不再存在
+```
+
+后续操作必须依据**更新后的面积和区域关系**，不能继续使用过时的邻接统计。
+
+重复这一过程，直到没有面积低于阈值的区域，或者整幅图像只剩一个区域。
+
+**5. 重新连续编号并输出。**
+
+合并后可能只剩下编号 `0、3、7、9`，需要将它们整理为：
+
+```text
+0、1、2、3
+```
+
+最终输出：
+
+```python
+final_labels    # (H, W)，连续编号的超像素标签图
+```
+
+完成后应满足：
+
+- 所有像素都有有效标签。
+- 每个标签对应且仅对应一个四连通区域。
+- 标签从 `0` 连续编号到 `K_final - 1`。
+- 所有区域的面积总和等于 `H * W`。
+
+实现时，可以将它拆成两个主要函数：**“提取连通块并统计面积”**和**“合并小块并重新编号”**。前者负责把不连通的部分分开，后者负责清理过小的碎片。
+
+---
+
+## 第 30 次问答
+
+时间：2026-10-22 20:27:37 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""SLIC 的连通性后处理。
+
+提取独立连通块及面积，逐次合并当前最小的小区域，
+最后将标签重新连续编号。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+_NEIGHBORS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+
+def split_components(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """提取四连通块，返回连通块编号图和各块面积。"""
+    H, W = labels.shape
+    component_map = np.full((H, W), -1, dtype=int)
+    component_sizes = []
+
+    # 进行深度优先搜索，每一个轮次都从一个未访问的像素点出发
+    # 向周边相同类型的点进行扩散。完成一轮后可以标记出一个新的联通区域
+    for y in range(H):
+        for x in range(W):
+            if component_map[y, x] != -1:
+                continue
+
+            comp_id = len(component_sizes)
+            target = labels[y, x]
+
+            stack = [(y, x)]
+            size = 0
+            while stack:
+                cy, cx = stack.pop()
+                if component_map[cy, cx] != -1:
+                    continue
+                component_map[cy, cx] = comp_id
+                size += 1
+
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < H and 0 <= nx < W:
+                        if component_map[ny, nx] == -1 and labels[ny, nx] == target:
+                            stack.append((ny, nx))
+
+            component_sizes.append(size)
+
+    return component_map, np.array(component_sizes)
+```
+
+我自己尝试实现了一下连通块提取功能，请你检查是否有问题
+
+**助手（2026-10-22 20:28:15 +08:00）：**
+
+**这份代码能够正确提取四连通块并统计面积，核心逻辑没有问题。** 你虽然是在出栈时才标记像素，但出栈后先检查了是否已访问，因此不会重复计算面积：
+
+```python
+if component_map[cy, cx] != -1:
+    continue
+```
+
+不过，这种写法会让某些像素**重复入栈**。建议改为入栈时立即标记，省去不必要的操作。
+
+**1. 将访问标记提前到入栈时。**
+
+目前，一个尚未出栈的像素仍然标记为 `-1`，它可能被不同邻居多次加入栈。虽然你能在出栈时跳过重复项，但这些重复项仍占用栈空间、增加处理次数。
+
+调整之后：
+
+- 起点入栈前，立即设置它的连通块编号。
+- 找到符合条件的邻居时，先设置编号，再入栈。
+- 每个像素只入栈一次，因此出栈时不再需要检查是否已经访问。
+
+注意，**提前标记后，必须删除原来的出栈跳过判断**，否则所有已标记的入栈像素都会被跳过。
+
+**2. 直接使用已经定义的 `_NEIGHBORS`。**
+
+你已经定义了：
+
+```python
+_NEIGHBORS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+```
+
+循环里可以直接写：
+
+```python
+for dy, dx in _NEIGHBORS:
+```
+
+不必再重复写一遍邻居列表。
+
+修改后的函数如下：
+
+```python
+def split_components(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """提取四连通块，返回连通块编号图和各块面积。"""
+    H, W = labels.shape
+    component_map = np.full((H, W), -1, dtype=np.int64)
+    component_sizes = []
+
+    for y in range(H):
+        for x in range(W):
+            if component_map[y, x] != -1:
+                continue
+
+            comp_id = len(component_sizes)
+            target = labels[y, x]
+
+            # 入栈时立即标记，避免同一像素重复入栈。
+            component_map[y, x] = comp_id
+            stack = [(y, x)]
+            size = 0
+
+            while stack:
+                cy, cx = stack.pop()
+                size += 1
+
+                for dy, dx in _NEIGHBORS:
+                    ny, nx = cy + dy, cx + dx
+
+                    if not (0 <= ny < H and 0 <= nx < W):
+                        continue
+
+                    if (
+                        component_map[ny, nx] == -1
+                        and labels[ny, nx] == target
+                    ):
+                        component_map[ny, nx] = comp_id
+                        stack.append((ny, nx))
+
+            component_sizes.append(size)
+
+    return component_map, np.asarray(component_sizes, dtype=np.int64)
+```
+
+这里显式指定 `np.int64` 是为了让编号和面积的数据类型明确；你的原实现对于正常的非空标签图，使用 `dtype=int` 和 `np.array(component_sizes)` 也可以。
+
+你可以用前面讨论的小例子检查结果：
+
+```python
+labels = np.array([
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 0, 1],
+    [2, 2, 1, 1, 1],
+    [2, 2, 2, 1, 1],
+])
+
+component_map, component_sizes = split_components(labels)
+```
+
+按照代码逐行扫描、依次编号的顺序，预期得到：
+
+```python
+component_map = np.array([
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 2, 1],
+    [3, 3, 1, 1, 1],
+    [3, 3, 3, 1, 1],
+])
+
+component_sizes = np.array([4, 10, 1, 5])
+```
+
+原始标签为 `0` 的两块区域，被分成了连通块 `0` 和 `2`，这正是我们希望实现的行为。
+
+以上是静态检查和示例推演，尚未运行代码。**你原来的实现没有重复计数的错误；这次主要是改进入栈标记的时机，让搜索更直接、避免重复入栈。**
+
+---
+
+## 第 31 次问答
+
+时间：2026-10-22 20:32:47 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+所以是要在入栈的时候就进行标记和面积累加是把
+
+**助手（2026-10-22 20:33:01 +08:00）：**
+
+**入栈时要立即标记；面积可以在入栈时累加，也可以在出栈时累加，选择一种即可，不要两处都加。**
+
+我上一条给出的代码采用的是：
+
+- **入栈时标记**，保证每个像素只入栈一次。
+- **出栈时面积加 1**，保证每个像素只计数一次。
+
+如果你希望在入栈时同时完成标记和面积统计，也完全可以：
+
+```python
+# 起点入栈：标记并计数。
+component_map[y, x] = comp_id
+stack = [(y, x)]
+size = 1
+
+while stack:
+    cy, cx = stack.pop()
+    # 出栈时不再累加面积。
+
+    for dy, dx in _NEIGHBORS:
+        ny, nx = cy + dy, cx + dx
+
+        if not (0 <= ny < H and 0 <= nx < W):
+            continue
+
+        if (
+            component_map[ny, nx] == -1
+            and labels[ny, nx] == target
+        ):
+            component_map[ny, nx] = comp_id
+            stack.append((ny, nx))
+            size += 1
+```
+
+两种写法结果相同。关键是：**入栈就标记，每个像素只统计一次，起点也要计入面积。**
+
+---
+
+## 第 32 次问答
+
+时间：2026-10-22 20:33:40 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+def split_components(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """提取四连通块，返回连通块编号图和各块面积。"""
+    H, W = labels.shape
+    component_map = np.full((H, W), -1, dtype=np.int64)
+    component_sizes = []
+    # 进行深度优先搜索，每一个轮次都从一个未访问的像素点出发
+    # 向周边相同类型的点进行扩散。完成一轮后可以标记出一个新的联通区域
+    for y in range(H):
+        for x in range(W):
+            if component_map[y, x] != -1:
+                continue
+
+            comp_id = len(component_sizes)
+            target = labels[y, x]
+
+            # 入栈时立即标记，避免同一像素重复入栈。
+            component_map[y, x] = comp_id
+            stack = [(y, x)]
+            size = 0
+
+            while stack:
+                cy, cx = stack.pop()
+                size += 1
+
+                for dy, dx in _NEIGHBORS:
+                    ny, nx = cy + dy, cx + dx
+
+                    if not (0 <= ny < H and 0 <= nx < W):
+                        continue
+
+                    if (
+                        component_map[ny, nx] == -1
+                        and labels[ny, nx] == target
+                    ):
+                        component_map[ny, nx] = comp_id
+                        stack.append((ny, nx))
+
+            component_sizes.append(size)
+
+    return component_map, np.asarray(component_sizes, dtype=np.int64)
+```
+
+这样是对的吧
+
+**助手（2026-10-22 20:33:54 +08:00）：**
+
+**对，这一版是正确的。** 你采用的是“入栈时标记、出栈时累计面积”，逻辑一致：
+
+- 起点和符合条件的邻居都在入栈时标记，保证每个像素只入栈一次。
+- 每次出栈执行 `size += 1`，保证每个像素只统计一次，起点也包含在内。
+- 只向原始标签相同的四邻域像素扩展，因此每轮搜索恰好得到一个四连通块。
+- `component_sizes.append(size)` 与 `comp_id = len(component_sizes)` 配合，保证 `component_sizes[k]` 对应编号为 `k` 的连通块面积。
+
+只要模块中已定义：
+
+```python
+_NEIGHBORS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+```
+
+并且输入是前面得到的二维整数标签图，这个函数就可以使用。**当前这一步无需再修改，接下来可以实现小区域的邻接统计和合并。**
+
+---
+
+## 第 33 次问答
+
+时间：2026-10-22 20:39:47 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+接下来的融合部分应该是不断进行循环，每次循环选择一个面积最小的区域进行融合。融合时去遍历区域边界，选择最长边界的区域融合进去（也就是修改编号）。一直到所有小于阈值的都融合完成后，进行重编号，结束
+
+**助手（2026-10-22 20:40:13 +08:00）：**
+
+**对，这就是我们选定的小区域合并流程。** 你说的“选择最长边界的区域”，更准确地说是：**选择与当前小区域共享边界最长的相邻区域**，而不是选择自身周长最大的区域。
+
+每轮可以按下面的顺序处理：
+
+1. **从仍然存在的区域中，选择面积最小的一块。**  
+   如果它的面积已经不小于阈值，说明所有区域都满足面积要求，可以结束循环。已被合并掉的区域不能再参与选择。
+
+2. **统计它与各相邻区域的共享边界长度。**  
+   第一版不必单独提取边界：遍历当前区域的像素，检查上下左右邻居。如果邻居属于其他区域，就给那个区域的接触边数加 `1`。
+
+3. **选择共享边界最长的区域作为目标。**  
+   如果并列，就选择编号较小者，保证结果可重复。目标区域本身也可以小于阈值，合并后再根据新的面积判断是否需要继续处理。
+
+4. **修改编号，同时更新面积。**  
+   假设将 `source` 合并到 `target`：
+
+   ```python
+   component_map[component_map == source] = target
+   component_sizes[target] += component_sizes[source]
+   component_sizes[source] = 0
+   ```
+
+   此后可以用 `component_sizes > 0` 判断哪些区域仍然存在。下一轮的边界统计要使用更新后的 `component_map`。
+
+5. **重复，最后重新连续编号。**  
+   如果只剩一个区域，也直接结束，不再寻找合并目标。
+
+还有一个实现上的细节：**先完成当前区域的全部边界统计，确定目标后，再统一修改标签。** 不要边统计边改编号，否则会改变正在统计的邻接关系。
+
+按这个流程，每轮都把两个实际相邻的连通区域合成一个，剩余区域数减少 `1`，同时保持连通性。最后重编号只是整理编号，不再改变区域的像素归属。
+
+---
+
+## 第 34 次问答
+
+时间：2026-10-22 20:43:48 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+def merge_small_components( 
+    component_map: np.ndarray, 
+    component_sizes: np.ndarray, 
+    min_size: int, 
+) -> np.ndarray: 
+    """循环合并小于 min_size 的小连通块到相邻边界最长的邻居上。""" 
+    H, W = component_map.shape 
+    adjusted = component_map.copy() 
+    sizes = component_sizes.copy() 
+ 
+    while True: 
+        small_regions = np.where(sizes < min_size)[0] 
+        if len(small_regions) == 0: 
+            break 
+ 
+        # 每次挑出当前面积最小的块 
+        k = small_regions[np.argmin(sizes[small_regions])] 
+ 
+        mask = (adjusted == k) 
+        ys, xs = np.where(mask) 
+        boundary_counts = {}
+```
+
+我初步实现了一下，我想询问一下边界查询具体如何实现
+
+**助手（2026-10-22 20:44:29 +08:00）：**
+
+边界查询可以直接接在你现在的代码后面：**遍历区域 `k` 中的每个像素，检查它的上下左右邻居；如果邻居属于其他区域，就给那个区域的共享边界计数加 `1`。** 不需要先生成一张单独的边界图。
+
+不过，先修改一下筛选小区域的条件：
+
+```python
+small_regions = np.where((sizes > 0) & (sizes < min_size))[0]
+```
+
+因为后面合并时会把源区域面积设为 `0`，必须排除这些已经不存在的区域，否则它们会被反复选中。
+
+你已经通过：
+
+```python
+ys, xs = np.where(mask)
+boundary_counts = {}
+```
+
+取得了区域 `k` 的所有像素坐标。接下来这样统计：
+
+```python
+for y, x in zip(ys, xs):
+    for dy, dx in _NEIGHBORS:
+        ny, nx = y + dy, x + dx
+
+        # 图像外侧不对应任何可合并的区域。
+        if not (0 <= ny < H and 0 <= nx < W):
+            continue
+
+        neighbor_id = int(adjusted[ny, nx])
+
+        # 同一区域内部的接触不属于区域边界。
+        if neighbor_id == k:
+            continue
+
+        boundary_counts[neighbor_id] = (
+            boundary_counts.get(neighbor_id, 0) + 1
+        )
+```
+
+这里，`boundary_counts` 的键是邻接区域编号，值是共享边界的长度。例如：
+
+```python
+boundary_counts = {
+    2: 8,
+    5: 13,
+    7: 4,
+}
+```
+
+表示当前区域与区域 `2`、`5`、`7` 分别共享 `8`、`13`、`4` 条像素边，因此应合并到区域 `5`。
+
+**这种统计不会把共享边界重复算两次**：你只遍历源区域 `k` 的像素，每条跨区域边只从源区域这一侧统计一次。同一个邻居像素如果通过不同方向接触源区域，则对应不同的接触边，应分别计数。
+
+统计完成后，选择目标并更新：
+
+```python
+# 共享边界越长越优先；并列时编号越小越优先。
+target = min(
+    boundary_counts,
+    key=lambda region_id: (-boundary_counts[region_id], region_id),
+)
+
+adjusted[mask] = target
+sizes[target] += sizes[k]
+sizes[k] = 0
+```
+
+结合你已有的代码，完整函数可以写成：
+
+```python
+def merge_small_components(
+    component_map: np.ndarray,
+    component_sizes: np.ndarray,
+    min_size: int,
+) -> np.ndarray:
+    """逐次将小连通块合并到共享边界最长的邻居，最后连续编号。"""
+    H, W = component_map.shape
+    adjusted = component_map.copy()
+    sizes = component_sizes.copy()
+
+    while True:
+        # 排除已经被合并掉的区域。
+        small_regions = np.where((sizes > 0) & (sizes < min_size))[0]
+
+        if len(small_regions) == 0:
+            break
+
+        # 只剩一个区域时，无须继续合并。
+        if np.count_nonzero(sizes > 0) <= 1:
+            break
+
+        # 面积并列时，small_regions 中靠前的编号被选中。
+        k = small_regions[np.argmin(sizes[small_regions])]
+
+        mask = adjusted == k
+        ys, xs = np.where(mask)
+        boundary_counts = {}
+
+        for y, x in zip(ys, xs):
+            for dy, dx in _NEIGHBORS:
+                ny, nx = y + dy, x + dx
+
+                if not (0 <= ny < H and 0 <= nx < W):
+                    continue
+
+                neighbor_id = int(adjusted[ny, nx])
+
+                if neighbor_id == k:
+                    continue
+
+                boundary_counts[neighbor_id] = (
+                    boundary_counts.get(neighbor_id, 0) + 1
+                )
+
+        # 对于合法的完整标签图，只要不止一个区域，
+        # 当前区域就应当存在相邻区域。
+        if not boundary_counts:
+            raise ValueError("当前区域没有相邻区域，请检查编号图和面积是否一致。")
+
+        target = min(
+            boundary_counts,
+            key=lambda region_id: (-boundary_counts[region_id], region_id),
+        )
+
+        # 完成边界统计后，再统一修改编号和面积。
+        adjusted[mask] = target
+        sizes[target] += sizes[k]
+        sizes[k] = 0
+
+    # 将剩余编号映射为 0, 1, ..., K_final - 1。
+    _, inverse = np.unique(adjusted, return_inverse=True)
+    return inverse.reshape(H, W).astype(np.int64)
+```
+
+最后的 `np.unique(..., return_inverse=True)` 会生成连续的新编号。例如原来剩余的编号是 `2、5、7`，就依次映射为 `0、1、2`，不会改变各区域包含哪些像素。
+
+---
+
+## 第 35 次问答
+
+时间：2026-10-22 20:44:30 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+def merge_small_components(
+    component_map: np.ndarray,
+    component_sizes: np.ndarray,
+    min_size: int,
+) -> np.ndarray:
+    """循环合并小于 min_size 的小连通块到相邻边界最长的邻居上。"""
+    H, W = component_map.shape
+    adjusted = component_map.copy()
+    sizes = component_sizes.copy()
+
+    while True:
+        small_regions = np.where(sizes < min_size)[0]
+        if len(small_regions) == 0:
+            break
+
+        # 每次挑出当前面积最小的块
+        k = small_regions[np.argmin(sizes[small_regions])]
+
+        mask = (adjusted == k)
+        ys, xs = np.where(mask)
+        boundary_counts = {}
+
+        # 统计四邻域接触的邻居边界长度
+        for y, x in zip(ys, xs):
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < H and 0 <= nx < W:
+                    nb = adjusted[ny, nx]
+                    if nb != k:
+                        boundary_counts[nb] = boundary_counts.get(nb, 0) + 1
+
+        # 找出现次数最多的邻居
+        target = max(boundary_counts, key=boundary_counts.get)
+
+        # 把当前块合并进目标邻居，并把当前块大小置 0
+        adjusted[mask] = target
+        sizes[target] += sizes[k]
+        sizes[k] = 0
+
+    return relabel_contiguous(adjusted)
+
+
+def relabel_contiguous(labels: np.ndarray) -> np.ndarray:
+    """将稀疏的连通块标签重新离散化编号为 0 到 N-1。"""
+    _, inverse = np.unique(labels, return_inverse=True)
+    return inverse.reshape(labels.shape)
+```
+
+我实现了一下，请你检查是否有问题
+
+**助手（2026-10-22 20:45:11 +08:00）：**
+
+**边界统计、标签合并和最后的连续编号都写对了，但循环控制还有两个必须修复的问题，以及一个并列选择规则需要调整。**
+
+**1. 必须排除面积为 `0` 的区域。**
+
+你现在写的是：
+
+```python
+small_regions = np.where(sizes < min_size)[0]
+```
+
+而每次合并后会执行：
+
+```python
+sizes[k] = 0
+```
+
+因此，下一轮这个已经消失的区域又会被选中，而且由于面积为 `0`，通常会被优先选中。随后：
+
+```python
+mask = (adjusted == k)
+```
+
+全部为 `False`，找不到任何像素，`boundary_counts` 为空，最终 `max()` 报错。
+
+应改为：
+
+```python
+small_regions = np.where((sizes > 0) & (sizes < min_size))[0]
+```
+
+**2. 只剩一个区域时，需要停止。**
+
+如果阈值大于整幅图像的面积，最后剩下的区域仍然满足“小于阈值”，但已经没有邻居可以合并。此时同样会对空字典调用 `max()`。
+
+在循环中补上：
+
+```python
+if np.count_nonzero(sizes > 0) <= 1:
+    break
+```
+
+正常参数下一般不会遇到这种情况，但明确处理后，函数的停止条件才完整。
+
+**3. 共享边界并列时，当前代码不保证选择编号最小的区域。**
+
+```python
+target = max(boundary_counts, key=boundary_counts.get)
+```
+
+可以正确选出共享边界最长的邻居。不过，如果多个邻居的计数相同，它会选择字典中最先插入的那个，取决于扫描顺序。
+
+如果沿用我们前面约定的“并列时选择编号较小者”，可以写成：
+
+```python
+target = min(
+    boundary_counts,
+    key=lambda region_id: (-boundary_counts[region_id], region_id),
+)
+```
+
+这里先比较负的边界长度，相当于优先选最长边界；再比较区域编号。
+
+修改后的函数如下，保留了你的整体结构：
+
+```python
+def merge_small_components(
+    component_map: np.ndarray,
+    component_sizes: np.ndarray,
+    min_size: int,
+) -> np.ndarray:
+    """将小连通块逐次合并到共享边界最长的邻居，最后连续编号。"""
+    H, W = component_map.shape
+    adjusted = component_map.copy()
+    sizes = component_sizes.copy()
+
+    while True:
+        # 仅考虑仍然存在的小区域。
+        small_regions = np.where(
+            (sizes > 0) & (sizes < min_size)
+        )[0]
+
+        if len(small_regions) == 0:
+            break
+
+        if np.count_nonzero(sizes > 0) <= 1:
+            break
+
+        # 面积相同时，选择编号较小者。
+        k = small_regions[np.argmin(sizes[small_regions])]
+
+        mask = adjusted == k
+        ys, xs = np.where(mask)
+        boundary_counts = {}
+
+        # 统计当前区域与各邻居的共享边界长度。
+        for y, x in zip(ys, xs):
+            for dy, dx in _NEIGHBORS:
+                ny, nx = y + dy, x + dx
+
+                if 0 <= ny < H and 0 <= nx < W:
+                    nb = int(adjusted[ny, nx])
+
+                    if nb != k:
+                        boundary_counts[nb] = (
+                            boundary_counts.get(nb, 0) + 1
+                        )
+
+        # 合法的完整标签图中，只要不止一个区域，
+        # 当前区域就应当存在邻居。
+        if not boundary_counts:
+            raise ValueError(
+                "当前区域没有相邻区域，请检查连通块编号图和面积是否一致。"
+            )
+
+        # 优先选择共享边界最长者，并列时选择编号较小者。
+        target = min(
+            boundary_counts,
+            key=lambda region_id: (-boundary_counts[region_id], region_id),
+        )
+
+        adjusted[mask] = target
+        sizes[target] += sizes[k]
+        sizes[k] = 0
+
+    return relabel_contiguous(adjusted)
+```
+
+其中 `_NEIGHBORS` 使用你在模块前面已经定义的四邻域常量即可。
+
+你的 `relabel_contiguous()` **可以保持原样**：
+
+```python
+def relabel_contiguous(labels: np.ndarray) -> np.ndarray:
+    """将现有区域标签重新连续编号为 0 到 N-1。"""
+    _, inverse = np.unique(labels, return_inverse=True)
+    return inverse.reshape(labels.shape)
+```
+
+它只会整理编号，不会改变区域的像素归属。对于由 `split_components()` 输出的合法连通块图和面积数组，修复上述循环问题后，这套合并流程能够保持每个区域的四连通性。
+
+以上是静态检查，尚未实际运行。最关键的修复是 **`sizes > 0` 的筛选条件**，否则第一次合并后就可能在下一轮报错。
+

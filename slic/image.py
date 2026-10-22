@@ -4,7 +4,6 @@ import numpy as np
 from PIL import Image
 from os import PathLike
 
-image_path = "/home/hhr/3_autumn/media/Saliency_Detection/images/"
 
 def load_rgb(image_path: str | PathLike[str]) -> np.ndarray:
     """
@@ -53,3 +52,19 @@ def prepare_rgb(image: np.ndarray) -> np.ndarray:
     return image.astype(np.float32, copy=True)
 
 
+
+def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    """将 RGB 图像转换为标准尺度的 CIE Lab 图像。
+
+    输入遵循 prepare_rgb() 的约定。
+    返回形状为 (H, W, 3) 的 float32 数组，通道依次为 L、a、b。
+    """
+    normalized_rgb = prepare_rgb(rgb)
+
+    lab = rgb2lab(
+        normalized_rgb,
+        illuminant="D65",
+        observer="2",
+    )
+
+    return lab.astype(np.float32, copy=False)

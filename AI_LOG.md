@@ -2296,3 +2296,566 @@ if isinstance(n_segments, (bool, np.bool_)) or not isinstance(
 
 这次是对所贴代码的静态检查。就当前这版而言，首先需要修复的是梯度数组尺寸；其他两个函数可以保留当前结构。
 
+---
+
+## 第 21 次问答
+
+时间：2026-10-22 17:41:34 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+接下来我们进行聚类更新的相关函数编写。主要实现两个函数：1. 分配像素，输入当前的图，进行像素分配，输出分配后的label图  2. 输入一个label图进行中心点的重计算。然后在主流程中，我们就反复调用这两个函数，迭代一定次数后停止。我的思路正确吗
+
+**助手（2026-10-22 17:42:17 +08:00）：**
+
+**你的思路正确：把一次迭代拆成“像素分配”和“中心重计算”两个函数，然后在主流程中交替调用。** 需要补充的是：这两个函数除了图像或标签图，还需要其他输入。
+
+**1. 像素分配：根据当前中心，生成标签图。**
+
+建议接口：
+
+```python
+def assign_pixels(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    step: float,
+    compactness: float,
+) -> np.ndarray:
+    ...
+```
+
+输入分别是：
+
+- `lab`：Lab 图像，形状为 `(H, W, 3)`。
+- `centers`：当前中心，形状为 `(K0, 5)`，沿用你的 `[L, a, b, y, x]` 顺序。
+- `step`：参考间隔 \(S\)。
+- `compactness`：紧致度参数 \(m\)。
+
+输出是 `(H, W)` 的整数标签图 `labels`，其中 `labels[y, x] = k` 表示该像素归属于第 `k` 个中心。
+
+函数内部的过程是：
+
+1. 创建标签图，初始值设为 `-1`，表示尚未分配。
+2. 创建同样大小的最小距离图，初始值设为正无穷。
+3. 遍历每个中心，只考察它附近约 \(2S\times2S\) 的窗口。
+4. 计算窗口内像素到该中心的综合距离。
+5. 如果该距离小于像素目前记录的最小距离，就同时更新最小距离和标签。
+
+比较距离时，可以直接使用距离的平方：
+
+\[
+D^2 =
+(L-L_k)^2+(a-a_k)^2+(b-b_k)^2
++\left(\frac{m}{S}\right)^2
+\left[(y-y_k)^2+(x-x_k)^2\right]
+\]
+
+**不需要开平方，因为比较 \(D^2\) 和比较 \(D\) 得到的大小顺序相同。**
+
+这里的最小距离图只是函数内部的辅助数组，不一定需要返回。**每次调用分配函数，都应重新把它初始化为正无穷**，因为中心已经变化，上一轮的距离不能直接拿来比较。
+
+**2. 中心重计算：根据标签分组，计算平均颜色和平均位置。**
+
+仅有标签图是不够的：标签图能告诉你哪些像素属于一组，但没有记录这些像素的 Lab 颜色。因此建议接口为：
+
+```python
+def update_centers(
+    lab: np.ndarray,
+    labels: np.ndarray,
+    centers: np.ndarray,
+) -> np.ndarray:
+    ...
+```
+
+对每个标签 `k`，找到属于它的全部像素，然后计算：
+
+\[
+C_k^{\mathrm{new}}=
+\left[
+\overline{L}_k,\,
+\overline{a}_k,\,
+\overline{b}_k,\,
+\overline{y}_k,\,
+\overline{x}_k
+\right]
+\]
+
+这里传入旧的 `centers`，除了能确定中心数量，还方便处理**空区域**：如果某个中心没有分到任何像素，可以先保留它上一轮的位置和颜色，避免对空数组求平均产生 `NaN`。
+
+另外，**更新后的中心坐标保留浮点数，不要取整**。例如平均位置是 `(12.4, 35.7)`，就直接保留；只在确定搜索窗口的数组切片范围时，才将窗口边界转换为整数。
+
+主流程可以按下面的结构组织：
+
+```python
+gradient = compute_gradient(lab)
+centers, step = initialize_centers(lab, n_segments)
+centers = perturb_centers(lab, centers, gradient)
+
+for _ in range(max_iter):
+    labels = assign_pixels(
+        lab,
+        centers,
+        step,
+        compactness,
+    )
+
+    centers = update_centers(
+        lab,
+        labels,
+        centers,
+    )
+
+# 迭代结束后，再对 labels 进行连通性处理。
+```
+
+固定迭代次数作为第一版的停止条件没有问题，可以先设为 `10` 次，后续再考虑加入“中心变化量足够小就提前停止”的条件。
+
+编写时还要检查一个关键点：**分配完成后，标签图中不能残留 `-1`。** 它意味着某些像素没有被任何搜索窗口覆盖，需要检查窗口边界和覆盖范围；不能直接让这些像素进入下一步中心重计算。
+
+---
+
+## 第 22 次问答
+
+时间：2026-10-22 18:00:13 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""SLIC 的距离计算、局部像素分配和聚类中心更新。
+
+中心统一使用 [L, a, b, y, x] 顺序。
+像素分配输出原始中心编号；连通性整理和最终连续编号由后续模块完成。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def assign_pixels(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    step: float,
+    compactness: float,
+) -> np.ndarray:
+    """
+    在各中心约 2S x 2S 的局部邻域内更新像素标签。
+
+    返回：
+    (H, W) 的 int32 标签图，标签是 centers 的行号。
+
+    未被窗口覆盖的像素补算到全部中心的距离。
+    距离相同时保留编号较小的中心。
+    """
+    H, W = lab.shape[:2]
+    K = len(centers)
+
+    
+    labels = np.zeros((H, W), dtype=np.int32)
+    distances = np.full((H, W), 1e10, dtype=np.float64)
+
+    S = int(step)
+    inv_step2 = (compactness / step) ** 2
+
+    for k in range(K):
+        cy = int(centers[k, 3])
+        cx = int(centers[k, 4])
+
+        y_min = max(0, cy - S)
+        y_max = min(H, cy + S)
+        x_min = max(0, cx - S)
+        x_max = min(W, cx + S)
+
+        patch_lab = lab[y_min:y_max, x_min:x_max]
+        yy, xx = np.mgrid[y_min:y_max, x_min:x_max]
+
+        # 算颜色距离和空间距离
+        d_color = np.sum((patch_lab - centers[k, :3]) ** 2, axis=-1)
+      
+        d_spatial = (yy - cy) ** 2 + (xx - cx) ** 2
+        d_total = d_color + inv_step2 * d_spatial
+
+        sub_dist = distances[y_min:y_max, x_min:x_max]
+        mask = d_total < sub_dist
+        sub_dist[mask] = d_total[mask]
+        labels[y_min:y_max, x_min:x_max][mask] = k
+
+    return labels
+
+
+def update_centers(
+    lab: np.ndarray,
+    labels: np.ndarray,
+    old_centers: np.ndarray,
+) -> np.ndarray:
+    """根据像素聚类结果重新计算簇均值作为新中心。"""
+    K = len(old_centers)
+    new_centers = np.zeros_like(old_centers)
+
+    for k in range(K):
+        mask = (labels == k)
+        
+        if np.any(mask):
+            new_centers[k, :3] = lab[mask].mean(axis=0)
+            
+            ys, xs = np.where(mask)
+            new_centers[k, 3] = ys.mean()
+            new_centers[k, 4] = xs.mean()
+        else:
+            new_centers[k] = old_centers[k]
+
+    return new_centers
+```
+
+我初步实现了一下这两个函数
+
+**助手（2026-10-22 18:01:10 +08:00）：**
+
+这两个函数的基本结构正确。**`update_centers()` 已经实现了我们讨论的均值更新和空区域处理；`assign_pixels()` 还有几处需要修改，主要涉及浮点中心坐标和未分配像素。**
+
+**1. 计算空间距离时，不要把中心坐标取整。**
+
+你现在写的是：
+
+```python
+cy = int(centers[k, 3])
+cx = int(centers[k, 4])
+```
+
+然后用它们计算空间距离：
+
+```python
+d_spatial = (yy - cy) ** 2 + (xx - cx) ** 2
+```
+
+但中心更新之后，坐标可能是 `(12.4, 35.7)`。如果先取整，实际计算的就是像素到 `(12, 35)` 的距离，不再是到真实聚类中心的距离。
+
+应保留浮点中心：
+
+```python
+cy = centers[k, 3]
+cx = centers[k, 4]
+```
+
+**只有确定数组切片的边界时才取整。** 例如采用下面的窗口范围：
+
+```python
+y_min = max(0, int(np.floor(cy - step)))
+y_max = min(H, int(np.ceil(cy + step)))
+x_min = max(0, int(np.floor(cx - step)))
+x_max = min(W, int(np.ceil(cx + step)))
+```
+
+这是将约 \(2S\times2S\) 的连续窗口向外取整为整数切片的一种实现方式。也不需要再写 `S = int(step)`，避免先把参考间隔截小。
+
+**2. 标签初始值应该是 `-1`，最小距离应该是正无穷。**
+
+现在的初始化是：
+
+```python
+labels = np.zeros((H, W), dtype=np.int32)
+distances = np.full((H, W), 1e10, dtype=np.float64)
+```
+
+这里有两个问题：
+
+- 未被任何窗口覆盖的像素，会直接保留标签 `0`，看起来像已经分配给第 0 个中心，实际却没有比较过距离。
+- `1e10` 虽然很大，但仍是人为设定的有限阈值；正无穷更符合“还没有任何候选距离”的含义。
+
+改为：
+
+```python
+labels = np.full((H, W), -1, dtype=np.int32)
+distances = np.full((H, W), np.inf, dtype=np.float64)
+```
+
+这样就能在局部分配结束后，用 `labels < 0` 检查遗漏的像素。
+
+**3. 文档中说“未被窗口覆盖的像素补算到全部中心的距离”，但代码尚未实现。**
+
+可以在遍历全部中心后，为仍然标记为 `-1` 的像素补算距离：
+
+```python
+missing_y, missing_x = np.where(labels < 0)
+
+for y, x in zip(missing_y, missing_x):
+    d_color = np.sum((centers[:, :3] - lab[y, x]) ** 2, axis=1)
+    d_spatial = (
+        (centers[:, 3] - y) ** 2
+        + (centers[:, 4] - x) ** 2
+    )
+    d_total = d_color + inv_step2 * d_spatial
+    labels[y, x] = np.argmin(d_total)
+```
+
+这属于对窗口覆盖不足的补充处理。正常情况下应尽量让局部窗口覆盖全部像素；如果发现经常有大量像素需要补算，应检查初始化和窗口设置，否则会损失 SLIC 局部搜索带来的效率优势。
+
+综合起来，`assign_pixels()` 可以修改为：
+
+```python
+def assign_pixels(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    step: float,
+    compactness: float,
+) -> np.ndarray:
+    """在各中心约 2S × 2S 的局部邻域内分配像素。
+
+    返回：
+        (H, W) 的 int32 标签图，标签是 centers 的行号。
+
+    未被窗口覆盖的像素补算到全部中心的距离。
+    距离相同时，在参与比较的中心中保留编号较小者。
+    """
+    H, W = lab.shape[:2]
+    K = len(centers)
+
+    if K == 0:
+        raise ValueError("至少需要一个聚类中心。")
+
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("step 必须是有限的正数。")
+
+    if not np.isfinite(compactness) or compactness < 0:
+        raise ValueError("compactness 必须是有限的非负数。")
+
+    labels = np.full((H, W), -1, dtype=np.int32)
+    distances = np.full((H, W), np.inf, dtype=np.float64)
+
+    spatial_weight = (compactness / step) ** 2
+
+    for k in range(K):
+        # 保留真实的浮点中心坐标。
+        cy = centers[k, 3]
+        cx = centers[k, 4]
+
+        # 仅在确定数组切片范围时取整。
+        y_min = max(0, int(np.floor(cy - step)))
+        y_max = min(H, int(np.ceil(cy + step)))
+        x_min = max(0, int(np.floor(cx - step)))
+        x_max = min(W, int(np.ceil(cx + step)))
+
+        patch_lab = lab[y_min:y_max, x_min:x_max]
+        yy, xx = np.mgrid[y_min:y_max, x_min:x_max]
+
+        d_color = np.sum(
+            (patch_lab - centers[k, :3]) ** 2,
+            axis=-1,
+        )
+        d_spatial = (yy - cy) ** 2 + (xx - cx) ** 2
+        d_total = d_color + spatial_weight * d_spatial
+
+        sub_dist = distances[y_min:y_max, x_min:x_max]
+        sub_labels = labels[y_min:y_max, x_min:x_max]
+
+        mask = d_total < sub_dist
+        sub_dist[mask] = d_total[mask]
+        sub_labels[mask] = k
+
+    # 补充分配未被任何局部窗口覆盖的像素。
+    missing_y, missing_x = np.where(labels < 0)
+
+    for y, x in zip(missing_y, missing_x):
+        d_color = np.sum(
+            (centers[:, :3] - lab[y, x]) ** 2,
+            axis=1,
+        )
+        d_spatial = (
+            (centers[:, 3] - y) ** 2
+            + (centers[:, 4] - x) ** 2
+        )
+        d_total = d_color + spatial_weight * d_spatial
+        labels[y, x] = np.argmin(d_total)
+
+    return labels
+```
+
+你原来的这一行：
+
+```python
+labels[y_min:y_max, x_min:x_max][mask] = k
+```
+
+**在这里可以正确修改原数组，并不是错误。** 上面将它拆成 `sub_labels`，只是为了与 `sub_dist` 的写法保持一致，便于阅读。
+
+对于 **`update_centers()`**，在 `old_centers` 是你初始化函数返回的 `float64` 数组、标签已经全部正确分配的前提下，当前实现可以使用：
+
+- `lab[mask].mean(axis=0)` 计算平均颜色。
+- `ys.mean()`、`xs.mean()` 计算平均位置。
+- 空区域保留旧中心。
+- 新中心写入独立数组，不会修改旧中心。
+
+它目前对每个中心都扫描一次完整标签图，计算量约为 \(O(KHW)\)。**作为第一版，这种写法清晰、便于检查，可以先保留。** 后续如果运行速度成为问题，再考虑用按标签累计求和的方法优化。
+
+以上是静态检查，尚未运行测试。修改后，应重点确认输出标签全部满足 `0 <= labels < len(centers)`，以及更新后的中心没有出现 `NaN`，并且仍保留浮点坐标。
+
+---
+
+## 第 23 次问答
+
+时间：2026-10-22 18:32:40 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""SLIC 的距离计算、局部像素分配和聚类中心更新。
+
+中心统一使用 [L, a, b, y, x] 顺序。
+像素分配输出原始中心编号；连通性整理和最终连续编号由后续模块完成。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def assign_pixels(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    step: float,
+    compactness: float,
+) -> np.ndarray:
+    """在各中心约 2S × 2S 的局部邻域内分配像素。
+
+    返回：
+        (H, W) 的 int32 标签图，标签是 centers 的行号。
+
+    未被窗口覆盖的像素补算到全部中心的距离。
+    距离相同时，在参与比较的中心中保留编号较小者。
+    """
+    H, W = lab.shape[:2]
+    K = len(centers)
+
+    if K == 0:
+        raise ValueError("至少需要一个聚类中心。")
+
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("step 必须是有限的正数。")
+
+    if not np.isfinite(compactness) or compactness < 0:
+        raise ValueError("compactness 必须是有限的非负数。")
+
+    labels = np.full((H, W), -1, dtype=np.int32)
+    distances = np.full((H, W), np.inf, dtype=np.float64)
+
+    spatial_weight = (compactness / step) ** 2
+
+    for k in range(K):
+        # 保留真实的浮点中心坐标。
+        cy = centers[k, 3]
+        cx = centers[k, 4]
+
+        # 仅在确定数组切片范围时取整。
+        y_min = max(0, int(np.floor(cy - step)))
+        y_max = min(H, int(np.ceil(cy + step)))
+        x_min = max(0, int(np.floor(cx - step)))
+        x_max = min(W, int(np.ceil(cx + step)))
+
+        patch_lab = lab[y_min:y_max, x_min:x_max]
+        yy, xx = np.mgrid[y_min:y_max, x_min:x_max]
+
+        d_color = np.sum(
+            (patch_lab - centers[k, :3]) ** 2,
+            axis=-1,
+        )
+        d_spatial = (yy - cy) ** 2 + (xx - cx) ** 2
+        d_total = d_color + spatial_weight * d_spatial
+
+        sub_dist = distances[y_min:y_max, x_min:x_max]
+        sub_labels = labels[y_min:y_max, x_min:x_max]
+
+        mask = d_total < sub_dist
+        sub_dist[mask] = d_total[mask]
+        sub_labels[mask] = k
+
+    # 补充分配未被任何局部窗口覆盖的像素。
+    missing_y, missing_x = np.where(labels < 0)
+
+    for y, x in zip(missing_y, missing_x):
+        d_color = np.sum(
+            (centers[:, :3] - lab[y, x]) ** 2,
+            axis=1,
+        )
+        d_spatial = (
+            (centers[:, 3] - y) ** 2
+            + (centers[:, 4] - x) ** 2
+        )
+        d_total = d_color + spatial_weight * d_spatial
+        labels[y, x] = np.argmin(d_total)
+
+    return labels
+
+
+def update_centers(
+    lab: np.ndarray,
+    labels: np.ndarray,
+    old_centers: np.ndarray,
+) -> np.ndarray:
+    """根据像素聚类结果重新计算簇均值作为新中心。"""
+    K = len(old_centers)
+    new_centers = np.zeros_like(old_centers)
+
+    for k in range(K):
+        mask = (labels == k)
+        
+        if np.any(mask):
+            new_centers[k, :3] = lab[mask].mean(axis=0)
+            
+            ys, xs = np.where(mask)
+            new_centers[k, 3] = ys.mean()
+            new_centers[k, 4] = xs.mean()
+        else:
+            new_centers[k] = old_centers[k]
+
+    return new_centers
+```
+
+我进行了修复，现在是否正确
+
+**助手（2026-10-22 19:28:44 +08:00）：**
+
+**是的，在沿用前面约定的输入条件下，这一版两个函数的核心逻辑已经正确，可以接入主流程进行迭代了。** 之前指出的几个问题都已修复。
+
+`assign_pixels()` 现在正确地完成了：
+
+- 保留浮点中心坐标，用真实中心计算空间距离。
+- 将标签初始化为 `-1`、最小距离初始化为正无穷，并在每次调用时重新创建。
+- 在各中心的局部窗口中比较颜色与空间的加权平方距离。
+- 同时更新最小距离和像素标签。
+- 对没有被窗口覆盖的像素进行补充分配。
+- 按中心编号递增遍历，并使用严格小于号更新，因此距离相同时保留参与比较的较小编号。
+
+`update_centers()` 也正确地按标签计算平均颜色和平均位置，并为空区域保留旧中心。
+
+这里的输入条件是：**`lab` 是有效的浮点 Lab 图像，`centers` 是前面初始化得到的浮点数组，且中心坐标位于图像范围内。** 在你的当前流程中，这些条件是满足的。尤其是：
+
+```python
+new_centers = np.zeros_like(old_centers)
+```
+
+会继承旧中心的数据类型。因为你的初始化函数返回 `float64`，所以平均坐标可以正确保留小数，不需要修改这一行。
+
+现在可以把它们接起来：
+
+```python
+gradient = compute_gradient(lab)
+centers, step = initialize_centers(lab, n_segments)
+centers = perturb_centers(lab, centers, gradient)
+
+for _ in range(max_iter):
+    labels = assign_pixels(lab, centers, step, compactness)
+    centers = update_centers(lab, labels, centers)
+```
+
+调试时，可以在循环中临时加上几项检查：
+
+```python
+assert labels.shape == lab.shape[:2]
+assert np.all((labels >= 0) & (labels < len(centers)))
+assert np.isfinite(centers).all()
+```
+
+这些检查能帮助发现未分配像素、异常标签和中心数值异常；分割边界是否合理，还需要结合图像上的可视化结果判断。
+
+**这次结论基于对所贴代码的静态检查，尚未实际运行。** 当前无需继续修改这两个函数的主体逻辑，下一步可以运行完整迭代、查看初步分割结果，然后进行连通性处理。
+

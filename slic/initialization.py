@@ -7,7 +7,23 @@ from __future__ import annotations
 
 import numpy as np
 
+def compute_gradient(lab: np.ndarray) -> np.ndarray:
+    """
+    计算 Lab 图像的梯度强度 
+    使用水平、竖直方向颜色差的平方和：
+    G = ||I[y+1, x] - I[y-1, x]||²
+      + ||I[y, x+1] - I[y, x-1]||²
 
+    返回 (H, W) 的 float64 数组。
+    """
+    H, W, _ = lab.shape
+    grad = np.zeros((H, W), dtype=np.float64)
+
+    diff_y = lab[2:, 1:-1] - lab[:-2, 1:-1]
+    diff_x = lab[1:-1, 2:] - lab[1:-1, :-2]
+    
+    grad[1:-1, 1:-1] = np.sum(diff_y**2 + diff_x**2, axis=-1)
+    return grad
 
 
 def initialize_centers(
@@ -56,3 +72,40 @@ def initialize_centers(
 
 
 
+def perturb_centers(
+    lab: np.ndarray,
+    centers: np.ndarray,
+    gradient: np.ndarray,
+) -> np.ndarray:
+    """
+    将中心移动到 3x3 邻域内梯度最小的位置。
+    """
+    H, W = lab.shape[:2]
+    adjusted = centers.copy()
+
+    for i in range(len(adjusted)):
+        y = int(adjusted[i, 3])
+        x = int(adjusted[i, 4])
+
+        min_grad = gradient[y, x]
+        best_y, best_x = y, x
+
+        y_min = max(0, y - 1)
+        y_max = min(H, y + 2)
+        x_min = max(0, x - 1)
+        x_max = min(W, x + 2)
+
+        # 找 3x3 窗口内最小梯度的坐标
+        local_grad = gradient[y_min:y_max, x_min:x_max]
+        min_idx = np.unravel_index(np.argmin(local_grad), local_grad.shape)
+
+        cand_y = y_min + min_idx[0]
+        cand_x = x_min + min_idx[1]
+
+        # 如果找到更小梯度的位置就更新
+        if gradient[cand_y, cand_x] < min_grad:
+            adjusted[i, 3] = cand_y
+            adjusted[i, 4] = cand_x
+            adjusted[i, :3] = lab[cand_y, cand_x]
+
+    return adjusted

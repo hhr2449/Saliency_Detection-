@@ -890,9 +890,9 @@ labels[y, x] = k
 
 **用户：**
 
-# 基于图形流排序的显著性检测
+`# 基于图形流排序的显著性检测`
 
-## SLIC
+##SLIC
 
 ```mermaid
 flowchart TD

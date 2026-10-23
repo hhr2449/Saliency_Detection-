@@ -1,16 +1,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+from matplotlib import font_manager
+import matplotlib.pyplot as plt
 
 from .image import prepare_rgb
-import matplotlib.pyplot as plt
 
 '''
 SLIC 结果可视化
-主要展示两种图像：
-1. 在原图上标出边界
-2. 将区域替换为平均颜色
+主要展示三种图像：
+1. 原始 RGB 图像
+2. 在原图上标出边界
+3. 将区域替换为平均颜色
 '''
 
 
@@ -59,3 +63,46 @@ def mean_color_image(rgb: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
     return out
 
+
+def _chinese_font():
+    """
+    选择系统中文字体，也兼容 Matplotlib 字体缓存尚未更新的情况。
+    """
+    font_paths = font_manager.findSystemFonts()
+    candidates = ("notosanscjk-regular", "sourcehansans", "msyh", "simhei", "pingfang", "droidsansfallback")
+
+    for candidate in candidates:
+        for font_path in font_paths:
+            if candidate in Path(font_path).name.lower():
+                return font_manager.FontProperties(fname=font_path)
+
+    return font_manager.FontProperties(family=["Microsoft YaHei", "SimHei", "sans-serif"])
+
+
+def plot_comparison(
+    original: np.ndarray,
+    boundaries: np.ndarray,
+    mean_colors: np.ndarray,
+    title: str | None = None,
+):
+    """
+    将三幅图并排展示，返回 Figure，供调用方保存或显示。
+    """
+
+    font = _chinese_font()
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    images = (original, boundaries, mean_colors)
+    titles = ("原图", "区域边界图", "区域平均颜色图")
+
+    for ax, image, panel_title in zip(axes, images, titles):
+        ax.imshow(image, interpolation="nearest")
+        ax.set_title(panel_title, fontproperties=font, fontsize=13)
+        ax.axis("off")
+
+    if title:
+        fig.suptitle(title, fontproperties=font, fontsize=14)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+    else:
+        fig.tight_layout()
+
+    return fig

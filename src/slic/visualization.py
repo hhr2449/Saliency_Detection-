@@ -49,16 +49,13 @@ def overlay_boundaries(
 
 
 def mean_color_image(rgb: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    """
-    将各区域替换为其原始 RGB 像素的平均颜色
-    """
+    """将各区域替换为其原始 RGB 像素的平均颜色。"""
     img = prepare_rgb(rgb)
     out = np.zeros_like(img)
 
-    for k in np.unique(labels):
-        mask = (labels == k)
+    for k in range(labels.max() + 1):
+        mask = labels == k
         out[mask] = img[mask].mean(axis=0)
 
     return out
-
 

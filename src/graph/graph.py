@@ -87,6 +87,10 @@ def compute_weights(
     weights = np.zeros(adj.shape, dtype=np.float64)
     rows, cols = np.nonzero(adj)
 
+    # 无边图直接返回零矩阵，避免对空距离数组求最值。
+    if rows.size == 0:
+        return weights
+
     # 1. 仅计算存在边的节点对距离
     dist = np.linalg.norm(mean_lab[rows] - mean_lab[cols], axis=1)
     # 2. 新增：将距离归一化到 [0, 1]。

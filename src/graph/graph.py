@@ -40,3 +40,38 @@ def build_spatial_adjacency(labels: np.ndarray) -> np.ndarray:
     return adj
 
 
+def add_two_hop_connections(spatial_adj: np.ndarray) -> np.ndarray:
+    """添加二跳连接 (A + A^2)"""
+    # 计算 A^2
+    two_hop = (spatial_adj.type(float) @ spatial_adj.type(float)) > 0
+    # 和 A 取或
+    adj = spatial_adj | two_hop
+    np.fill_diagonal(adj, False)
+    return adj
+
+
+def add_boundary_connections(
+    labels: np.ndarray,
+    adj: np.ndarray,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """将位于图像四周边缘的超像素节点全部两两互连"""
+
+    # 先提取四个边上的区域编号
+    boundary_nodes = {
+        "top": np.unique(labels[0, :]),
+        "bottom": np.unique(labels[-1, :]),
+        "left": np.unique(labels[:, 0]),
+        "right": np.unique(labels[:, -1]),
+    }
+    # 然后去重
+    all_boundary = np.unique(np.concatenate(list(boundary_nodes.values())))
+
+    
+    # 边缘节点全连接
+    for u in all_boundary:
+        for v in all_boundary:
+            if u != v:
+                adj[u, v] = True
+
+    return adj, boundary_nodes
+

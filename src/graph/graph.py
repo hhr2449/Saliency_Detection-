@@ -87,9 +87,19 @@ def compute_weights(
     weights = np.zeros(adj.shape, dtype=np.float64)
     rows, cols = np.nonzero(adj)
 
-    # 仅计算存在边的节点对距离
+    # 1. 仅计算存在边的节点对距离
     dist = np.linalg.norm(mean_lab[rows] - mean_lab[cols], axis=1)
-    weights[rows, cols] = np.exp(-dist / (sigma_square))
+    # 2. 新增：将距离归一化到 [0, 1]。
+    d_min = dist.min()
+    d_max = dist.max()
+    if d_max > d_min:
+        dist = (dist - d_min) / (d_max - d_min)
+    else:
+        # 所有距离相等时，采用统一边权为 1 的约定。
+        dist = np.zeros_like(dist)
+
+    # 3. 使用归一化后的距离计算权重。
+    weights[rows, cols] = np.exp(-dist / sigma_square)
 
     return weights
 

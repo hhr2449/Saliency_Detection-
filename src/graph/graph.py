@@ -79,7 +79,7 @@ def add_boundary_connections(
 def compute_weights(
     adj: np.ndarray,
     mean_lab: np.ndarray,
-    sigma: float,
+    sigma_square: float,
 ) -> np.ndarray:
     """
     计算已连接节点间的颜色高斯相似度权重
@@ -89,7 +89,7 @@ def compute_weights(
 
     # 仅计算存在边的节点对距离
     dist = np.linalg.norm(mean_lab[rows] - mean_lab[cols], axis=1)
-    weights[rows, cols] = np.exp(-dist / (sigma**2))
+    weights[rows, cols] = np.exp(-dist / (sigma_square))
 
     return weights
 
@@ -97,7 +97,7 @@ def compute_weights(
 def build_graph(
     labels: np.ndarray,
     mean_lab: np.ndarray,
-    sigma: float = 10.0,
+    sigma_square: float = 0.1,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """
     构建完整的超像素图
@@ -105,6 +105,6 @@ def build_graph(
     adj = build_spatial_adjacency(labels)
     adj = add_two_hop_connections(adj)
     adj, boundary_nodes = add_boundary_connections(labels, adj)
-    weights = compute_weights(adj, mean_lab, sigma)
+    weights = compute_weights(adj, mean_lab, sigma_square)
 
     return adj, weights, boundary_nodes

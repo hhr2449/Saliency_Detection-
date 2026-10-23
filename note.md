@@ -250,31 +250,50 @@ centers, labels, sizes = slic(
 
 使用slic函数作为这个模块的对外接口，输入图像数组和必要的参数，函数完成SLIC然后输出中心点数组，label标记数组等
 
+## 构建超像素图
 
+### 1. 确定节点
 
-| 顺序 | 本次只完成的内容                                             | 完成标准                                                     | 建议提交信息                                           |
-| ---- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------ |
-| 0    | 保存现有目录与代码骨架                                       | 文件已纳入版本管理，包能导入                                 | `chore: add SLIC project skeleton`                     |
-| 1    | 添加依赖声明和 `.gitignore`                                  | 声明 NumPy、Pillow、scikit-image、pytest；忽略缓存和生成结果 | `chore: configure dependencies and ignored files`      |
-| 2    | `image.prepare_rgb()`                                        | 正确转换 uint8、浮点输入；拒绝非法尺寸、范围和非有限值       | `feat: validate and normalize RGB input`               |
-| 3    | `image.load_rgb()`                                           | 能读取图片，并返回统一格式的 RGB 数组                        | `feat: load images as RGB arrays`                      |
-| 4    | `image.rgb_to_lab()`                                         | 转换后尺寸正确，已知颜色的 Lab 值合理                        | `feat: convert RGB images to Lab`                      |
-| 5    | `initialization.compute_gradient()`                          | 纯色图梯度为零；颜色交界处有响应；边缘不越界                 | `feat: compute Lab image gradients`                    |
-| 6    | `initialization.initialize_centers()`                        | 网格中心分布合理，坐标有效，返回参考间隔 `S`                 | `feat: initialize SLIC centers on a grid`              |
-| 7    | `initialization.perturb_centers()`                           | 中心移动到局部低梯度位置，同时更新颜色和坐标                 | `feat: move initial centers to low-gradient positions` |
-| 8    | `visualization.find_boundaries()`                            | 人工标签图的水平、竖直边界提取正确                           | `feat: extract superpixel boundaries`                  |
-| 9    | `visualization.overlay_boundaries()`                         | 能叠加边界，并保持输入图像不被修改                           | `feat: overlay superpixel boundaries on images`        |
-| 10   | 在 `clustering.py` 新增私有距离函数 `_compute_distance_squared()` | 颜色项、空间项及权重能通过手算样例核对                       | `feat: compute SLIC color-spatial distances`           |
-| 11   | `clustering.assign_pixels()`                                 | 局部窗口内竞争分配正确，每轮重置距离，最终无未分配像素       | `feat: assign pixels to nearby SLIC centers`           |
-| 12   | `clustering.compute_region_stats()`                          | 人工区域的面积、平均颜色和平均位置计算正确                   | `feat: compute superpixel region statistics`           |
-| 13   | `clustering.update_centers()`                                | 正确更新非空中心，空簇保留旧中心，无除零问题                 | `feat: update SLIC cluster centers`                    |
-| 14   | `connectivity.split_components()`                            | 同一标签的不同四连通块获得不同编号                           | `feat: split labels into connected components`         |
-| 15   | `connectivity.relabel_contiguous()`                          | 任意有效标签被映射成连续编号，区域归属不变                   | `feat: relabel regions with contiguous identifiers`    |
-| 16   | `connectivity.merge_small_components()`                      | 小块并入共享边界最长的邻区；连续多次合并仍正确               | `feat: merge small adjacent components`                |
-| 17   | `connectivity.enforce_connectivity()`                        | 串联拆分、合并、编号，每个最终标签对应一个连通区域           | `feat: enforce superpixel connectivity`                |
-| 18   | `core.segment_slic()`                                        | 串联完整算法，检查参数，并重新统计最终区域特征               | `feat: assemble the complete SLIC pipeline`            |
-| 19   | `demo_slic.main()` 的读取与运行部分                          | 能从命令行读取真实图片，运行分割，输出实际区域数             | `feat: run SLIC from the command line`                 |
-| 20   | 演示程序的结果保存功能                                       | 保存标签、边界图及参数记录                                   | `feat: save SLIC segmentation results`                 |
-| 21   | 完整流程的集成验证                                           | 纯色、双色、小图、长条图和 `K=1` 均满足最终输出约定          | `test: verify the complete SLIC pipeline`              |
-| 22   | README 使用说明                                              | 写明安装、运行命令、输出文件和参数含义                       | `docs: document SLIC usage and parameters`             |
+一个超像素对应一个图节点
 
+SLIC 输出了最终标签图和各区域的平均 Lab 颜色。后续不再逐像素建立图，而是以超像素为单位：
+
+- 标签图用于确定区域的空间关系。
+- 区域平均 Lab 颜色用于计算连接权重。
+- 节点编号直接沿用最终超像素标签编号。
+
+### 2. 确定图的连接关系
+
+第一类是局部连接：
+
+- 相邻区域对应的节点建立连接。
+- 邻居的邻居也建立连接。
+
+例如，原始空间邻接关系是 `A—B—C`，则额外连接 `A—C`。这里的二阶邻居依据原始空间邻接关系计算，不是不断扩展直到所有节点都连接。
+
+第二类是图像边界连接：
+
+- 找出接触整幅图像上、下、左、右四侧的超像素。
+- 将这些边界节点两两连接，形成论文所说的闭环图。
+
+这里的“边界”指**图像最外侧边缘**，不是任意两个超像素之间的区域边界
+
+这两类连接分别利用局部连续性和背景先验。
+
+| 连接规则             | 利用的特点                                                   | 希望达到的效果                                       |
+| -------------------- | ------------------------------------------------------------ | ---------------------------------------------------- |
+| 邻居及邻居的邻居连接 | 附近区域往往属于同一物体或同一片背景，可能具有相近的颜色和显著程度 | 让排序利用局部关联，在稍大的邻域内传播信息           |
+| 图像边界节点两两连接 | 图像边界区域更可能属于背景，相似背景可能分布在不同边缘       | 让相隔较远的相似背景建立直接联系，缩短图上的传播路径 |
+
+### 3. 计算边权
+
+- 连接关系决定：两个区域之间是否存在直接联系。
+- 边权决定：已经连接的两个区域之间，联系有多强。
+
+设节点的平均 Lab 颜色为 \(c_i\)，采用：
+
+$ w_{ij}= \begin{cases} \exp\left(-\dfrac{\lVert c_i-c_j\rVert_2}{\sigma^2}\right), & i\ne j\text{ 且两节点连接},\\[6pt] 0,&\text{其他情况}. \end{cases} $
+
+颜色越接近，连接权重越大；颜色差异越大，权重越小。因此，即使天空和草地都属于边界区域，它们之间也不会仅因建立了连接就产生很强的关联。
+
+没有直接连接的两个节点，仍然可以通过其他节点间接关联。后面的流形排序将综合整张图的连接和权重，计算各节点与查询节点的关联程度。

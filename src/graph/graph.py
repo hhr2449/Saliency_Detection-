@@ -43,7 +43,7 @@ def build_spatial_adjacency(labels: np.ndarray) -> np.ndarray:
 def add_two_hop_connections(spatial_adj: np.ndarray) -> np.ndarray:
     """添加二跳连接 (A + A^2)"""
     # 计算 A^2
-    two_hop = (spatial_adj.type(float) @ spatial_adj.type(float)) > 0
+    two_hop = (spatial_adj.astype(float) @ spatial_adj.astype(float)) > 0
     # 和 A 取或
     adj = spatial_adj | two_hop
     np.fill_diagonal(adj, False)
@@ -75,3 +75,36 @@ def add_boundary_connections(
 
     return adj, boundary_nodes
 
+
+def compute_weights(
+    adj: np.ndarray,
+    mean_lab: np.ndarray,
+    sigma: float,
+) -> np.ndarray:
+    """
+    计算已连接节点间的颜色高斯相似度权重
+    """
+    weights = np.zeros(adj.shape, dtype=np.float64)
+    rows, cols = np.nonzero(adj)
+
+    # 仅计算存在边的节点对距离
+    dist = np.linalg.norm(mean_lab[rows] - mean_lab[cols], axis=1)
+    weights[rows, cols] = np.exp(-dist / (sigma**2))
+
+    return weights
+
+
+def build_graph(
+    labels: np.ndarray,
+    mean_lab: np.ndarray,
+    sigma: float = 10.0,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """
+    构建完整的超像素图
+    """
+    adj = build_spatial_adjacency(labels)
+    adj = add_two_hop_connections(adj)
+    adj, boundary_nodes = add_boundary_connections(labels, adj)
+    weights = compute_weights(adj, mean_lab, sigma)
+
+    return adj, weights, boundary_nodes

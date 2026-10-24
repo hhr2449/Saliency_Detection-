@@ -31,15 +31,8 @@ def background_query(
         query_vector[boundary_nodes[side]] = 1.0
 
         scores = rank_queries(B, query_vector)
-        side_saliency = 1.0 - scores
+        side_saliency = 1.0 - normalize_scores(scores)
         initial_scores *= side_saliency
 
     # 对融合结果归一化，供前景阶段选择查询节点
-    scores = np.asarray(scores, dtype=np.float64)
-    score_min = scores.min()
-    score_max = scores.max()
-
-    if score_max == score_min:
-        return np.zeros_like(scores)
-
-    return (scores - score_min) / (score_max - score_min)
+    return normalize_scores(initial_scores)

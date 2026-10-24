@@ -29,6 +29,7 @@ dist/
 *.egg-info/
 
 # 实验生成结果
+/output/
 /outputs/
 /results/
 /logs/

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-from slic.visualization import (
+from visualization.superpixels import (
     find_boundaries,
     mean_color_image,
     overlay_boundaries,

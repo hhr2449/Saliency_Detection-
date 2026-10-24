@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from slic.core import slic
 from slic.image import load_rgb
-from slic.visualization import mean_color_image, overlay_boundaries, plot_comparison
+from visualization.superpixels import mean_color_image, overlay_boundaries, plot_comparison
 
 
 def build_parser() -> argparse.ArgumentParser:

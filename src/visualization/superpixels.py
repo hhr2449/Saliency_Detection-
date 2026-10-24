@@ -7,7 +7,7 @@ import numpy as np
 from matplotlib import font_manager
 import matplotlib.pyplot as plt
 
-from .image import prepare_rgb
+from slic.image import prepare_rgb
 
 '''
 SLIC 结果可视化
@@ -43,7 +43,7 @@ def overlay_boundaries(
     color: tuple[float, float, float] = (1.0, 0.0, 0.0),
 ) -> np.ndarray:
     """
-    在原图副本上叠加边界，返回 [0, 1] 的 RGB float32 图像。
+    在原图副本上叠加边界，返回 [0, 1] 的 RGB float32 图像
     直接将边界的像素改为指定的颜色
     """
     result = prepare_rgb(rgb)
@@ -53,7 +53,7 @@ def overlay_boundaries(
 
 
 def mean_color_image(rgb: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    """将各区域替换为其原始 RGB 像素的平均颜色。"""
+    """将各区域替换为其原始 RGB 像素的平均颜色"""
     img = prepare_rgb(rgb)
     out = np.zeros_like(img)
 
@@ -66,7 +66,7 @@ def mean_color_image(rgb: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 def _chinese_font():
     """
-    选择系统中文字体，也兼容 Matplotlib 字体缓存尚未更新的情况。
+    选择系统中文字体，也兼容 Matplotlib 字体缓存尚未更新的情况
     """
     font_paths = font_manager.findSystemFonts()
     candidates = ("notosanscjk-regular", "sourcehansans", "msyh", "simhei", "pingfang", "droidsansfallback")
@@ -86,7 +86,7 @@ def plot_comparison(
     title: str | None = None,
 ):
     """
-    将三幅图并排展示，返回 Figure，供调用方保存或显示。
+    将三幅图并排展示，返回 Figure，供调用方保存或显示
     """
 
     font = _chinese_font()

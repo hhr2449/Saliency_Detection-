@@ -502,7 +502,7 @@ $$\boxed{f^*=(D-\alpha W)^{-1}y}$$
 
 
 
-## 两步查询
+## 显著性查询
 
 ### 背景查询
 
@@ -515,6 +515,8 @@ $s_{\mathrm{side}}=1-\operatorname{normalize}(f_{\mathrm{side}}) $
 然后将四组显著性分数**逐元素相乘**：
 
 $ s_{\mathrm{initial}} =s_{\mathrm{top}}\odot s_{\mathrm{bottom}} \odot s_{\mathrm{left}}\odot s_{\mathrm{right}} $
+
+然后归一化
 
 > [!tip]
 >
@@ -534,7 +536,7 @@ $ s_{\mathrm{initial}} =s_{\mathrm{top}}\odot s_{\mathrm{bottom}} \odot s_{\math
 
 ### 前景查询
 
-根据第一阶段融合结果的平均显著值，选择高于阈值的超像素作为前景候选。
+根据第一阶段融合结果的平均显著值，选择不低于阈值（超像素分数平均值）的超像素作为前景候选。
 
 注意，这里选择的是**显著性高的节点**，它们与背景的关联通常较弱，也就是比较显著的区域
 

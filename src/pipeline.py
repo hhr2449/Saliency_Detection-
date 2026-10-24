@@ -1,4 +1,4 @@
-"""串联各算法模块，提供完整的显著性检测入口。"""
+"""串联各算法模块，提供完整的显著性检测入口"""
 
 from __future__ import annotations
 
@@ -18,21 +18,24 @@ def detect_saliency(
     min_size_factor: float = 0.25,
     sigma_square: float = 0.1,
     alpha: float = 0.99,
-) -> np.ndarray:
+    *,
+    return_details: bool = False,
+) -> np.ndarray | dict[str, np.ndarray]:
     """
     串联 SLIC、超像素建图和两阶段查询，返回像素级显著图
 
     image 为 (H, W, 3) 的 RGB 图像
-    sigma_square 为边权公式中的 sigma²，alpha 为排序参数。
+    sigma_square 为边权公式中的 sigma²，alpha 为排序参数
 
-    返回 (H, W) 的 float64 显著图，取值范围为 [0, 1]。
-    输入图像保持不变。
+    默认返回 (H, W) 的 float64 显著图，取值范围为 [0, 1]
+    return_details=True 时返回显著图、中心、标签、面积和两阶段节点分数
+    输入图像保持不变
     """
     if not np.isfinite(sigma_square) or sigma_square <= 0:
         raise ValueError("sigma_square 必须是有限的正数。")
 
     # 1. SLIC 分割，获取最终标签和区域平均 Lab 颜色
-    centers, labels, _ = slic(
+    centers, labels, sizes = slic(
         image,
         n_segments=n_segments,
         compactness=compactness,
@@ -55,4 +58,16 @@ def detect_saliency(
     final_scores = foreground_query(B, initial_scores)
 
     # 5. 将超像素分数映射回每个像素
-    return final_scores[labels]
+    saliency_map = final_scores[labels]
+
+    if return_details:
+        return {
+            "saliency_map": saliency_map,
+            "centers": centers,
+            "labels": labels,
+            "sizes": sizes,
+            "initial_scores": initial_scores,
+            "final_scores": final_scores,
+        }
+
+    return saliency_map

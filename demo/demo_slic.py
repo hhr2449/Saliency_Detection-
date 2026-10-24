@@ -1,4 +1,4 @@
-"""调用 SLIC 接口，输出三种图像、三联展示图及 metadata。"""
+"""调用 SLIC 接口，输出三种图像、三联展示图及 metadata"""
 
 from __future__ import annotations
 
@@ -15,13 +15,12 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from slic.core import slic
+from slic import slic
 from slic.image import load_rgb
-from visualization.superpixels import mean_color_image, overlay_boundaries, plot_comparison
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """读取图像路径、图名、保存路径和可选的 SLIC 参数。"""
+    """读取图像路径、图名、保存路径和可选的 SLIC 参数"""
     parser = argparse.ArgumentParser(description="SLIC 分割和可视化演示")
     parser.add_argument("image", type=Path, help="输入图像路径")
     parser.add_argument(
@@ -41,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def save_rgb(image: np.ndarray, image_path: Path) -> None:
-    """保存 [0, 1] 的 RGB 图像，四舍五入转换为 uint8 PNG。"""
+    """保存 [0, 1] 的 RGB 图像，四舍五入转换为 uint8 PNG"""
     pixels = np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8)
     Image.fromarray(pixels).save(image_path)
 
@@ -58,10 +57,13 @@ def main() -> None:
     if save_dir is None:
         save_dir = PROJECT_ROOT / "outputs" / "slic" / image_name
 
-    # 默认仅保存图片，支持没有图形界面的终端环境。
+    # 先设置绘图后端，再导入可视化接口
     if not args.show:
         import matplotlib
         matplotlib.use("Agg")
+
+    import matplotlib.pyplot as plt
+    from visualization import mean_color_image, overlay_boundaries, plot_comparison
 
     image = load_rgb(args.image)
     start = perf_counter()
@@ -137,7 +139,6 @@ def main() -> None:
     print(f"SLIC 耗时：{slic_seconds:.3f} 秒")
     print(f"保存目录：{save_dir.resolve()}")
 
-    import matplotlib.pyplot as plt
     if args.show:
         plt.show()
     plt.close(fig)

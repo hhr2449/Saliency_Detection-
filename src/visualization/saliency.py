@@ -23,10 +23,9 @@ def foreground_query_image(
     不低于超像素平均显著值的节点设为 True，与前景查询的选择规则一致
     显示时白色表示入选的前景查询区域，黑色表示其余区域
     """
-
-    saliency_map = initial_scores[labels]
-    threshold = saliency_map.mean()
-    return saliency_map > threshold  # 顺手把 >= 写成了 >
+    threshold = initial_scores.mean()
+    query_mask = initial_scores >= threshold
+    return query_mask[labels]
 
 
 def plot_saliency(image: np.ndarray, title: str = "显著图"):
@@ -35,7 +34,7 @@ def plot_saliency(image: np.ndarray, title: str = "显著图"):
     """
     font = _chinese_font()
     fig, ax = plt.subplots(figsize=(5, 5))
-    ax.imshow(image, cmap="gray")
+    ax.imshow(image, cmap="gray", vmin=0, vmax=1)
     ax.set_title(title, fontproperties=font, fontsize=13)
     ax.axis("off")
     plt.tight_layout()
@@ -54,12 +53,11 @@ def plot_stage_comparison(
     font = _chinese_font()
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-    # 真人只有两张图时，通常直接复制粘贴两遍，不会用 zip
     axes[0].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
     axes[0].set_title("第一阶段显著图", fontproperties=font, fontsize=13)
     axes[0].axis("off")
 
-    axes[1].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
+    axes[1].imshow(final_saliency, cmap="gray", vmin=0, vmax=1)
     axes[1].set_title("最终显著图", fontproperties=font, fontsize=13)
     axes[1].axis("off")
 
@@ -84,14 +82,14 @@ def plot_saliency_comparison(
     font = _chinese_font()
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
-    imgs = [original, foreground_queries, initial_saliency, final_saliency]
+    imgs = [original, initial_saliency, foreground_queries, final_saliency]
     titles = ["原图", "第一阶段显著图", "前景查询二值图", "最终显著图"]
 
     for i in range(4):
         if i == 0:
             axes[i].imshow(imgs[i])
         else:
-            axes[i].imshow(imgs[i], cmap="gray")
+            axes[i].imshow(imgs[i], cmap="gray", vmin=0, vmax=1)
         axes[i].set_title(titles[i], fontproperties=font, fontsize=13)
         axes[i].axis("off")
 

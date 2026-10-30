@@ -8884,3 +8884,636 @@ return normalize_scores(initial_scores)
 
 ---
 
+
+## 第 87 次问答
+
+时间：2026-10-24 20:57:20 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+我已经完成了整个算法流程，现在我在思考可视化部分。之前我们在slic模块中实现了可视化的部分，现在整体流程已经完成了，我在想是不是可以吧可视化单独整理成一个模块，将slic可视化和最终显著性结果可视化合在一起，你觉得我的想法如何
+
+**助手（2026-10-24 20:58:25 +08:00）：**
+
+**这个想法合理。现在已经有完整的算法流程，把可视化整理成独立模块，可以统一管理展示方式，也方便后面做实验和生成报告图片。**
+
+你之前写的 SLIC 可视化函数可以继续复用，只是将它们从“属于 SLIC 算法的功能”调整为“展示 SLIC 结果的功能”。
+
+**模块之间可以这样分工：**
+
+| 部分 | 负责的内容 |
+|---|---|
+| SLIC、建图、ranking、saliency | 计算超像素、图结构和显著性分数 |
+| visualization | 根据已有结果生成展示图、比较图 |
+| demo | 读取图片、调用算法、调用可视化、保存图片和 metadata |
+
+这样，可视化模块就像算法结果的展示层。调整标题、颜色、排版时，可以集中修改这一部分。
+
+**可视化模块内部，可以按展示对象分成两个文件。**
+
+- `superpixels.py`：放已有的超像素边界提取、边界叠加、区域平均颜色图，以及 SLIC 三联图。
+- `saliency.py`：放显著图展示、第一阶段与第二阶段对比，以及整个算法的结果展示。
+- `__init__.py`：统一导出对外使用的函数。
+
+如果两部分确实共用中文字体设置或图片保存逻辑，再把这些公共功能提取出来即可。
+
+**对于展示内容，我建议保留两种比较图。**
+
+第一种是已有的 **SLIC 分割效果图**：
+
+```text
+原图 ｜ 区域边界图 ｜ 区域平均颜色图
+```
+
+它主要帮助你判断超像素分割是否合理。
+
+第二种是新增的 **显著性检测流程图**：
+
+```text
+原图 ｜ 超像素边界图 ｜ 第一阶段显著图 ｜ 最终显著图
+```
+
+这张图能同时展示区域划分、背景查询的初步结果，以及前景查询带来的变化。如果后面分析四侧背景查询的影响，还可以单独生成四侧显著图的比较图。
+
+显著图建议首先使用灰度展示，并统一为 **黑色表示低显著度，白色表示高显著度**，灰度范围固定在 `[0, 1]`，方便比较不同阶段。
+
+**接口上，让可视化函数接收已经算好的结果。**
+
+例如：
+
+- 超像素展示接收原图和 `labels`。
+- 显著性展示接收原图、第一阶段像素级显著图和最终像素级显著图。
+- 综合比较图再额外接收 `labels`，用于生成边界叠加图。
+
+超像素分数到像素图的映射：
+
+```python
+saliency_map = scores[labels]
+```
+
+可以作为显著性结果生成的一部分完成，再交给可视化模块。绘图函数只负责展示，不在内部重新执行 SLIC 或排序。
+
+这样，你现有的 SLIC 可视化能够自然并入新模块，后续添加显著图、阶段对比图和实验结果图，也都有明确的位置。
+
+---
+
+## 第 88 次问答
+
+时间：2026-10-24 21:01:47 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+显著性检测部分要哪些图
+
+**助手（2026-10-24 21:02:44 +08:00）：**
+
+**显著性检测部分，建议先做“第一阶段显著图、最终显著图、三图对比”，再补充用于分析的中间结果。**
+
+**核心展示可以有这三项：**
+
+| 图像 | 展示内容 | 主要用途 |
+|---|---|---|
+| 第一阶段显著图 | 四侧背景查询融合后的结果 \(s_{\mathrm{initial}}\) | 观察从背景角度识别出了哪些显著区域 |
+| 最终显著图 | 前景查询得到的结果 \(s_{\mathrm{final}}\) | 展示算法最终输出 |
+| 三图对比 | 原图、第一阶段显著图、最终显著图并排 | 观察第二阶段带来了什么变化 |
+
+三图对比可以这样排：
+
+```text
+┌──────────────┬──────────────────┬──────────────────┐
+│     原图     │ 第一阶段显著图   │   最终显著图     │
+└──────────────┴──────────────────┴──────────────────┘
+```
+
+前两张都是与原图大小相同的灰度图：**黑色表示低显著度，白色表示高显著度。** 三图对比方便观察，单独保存的最终显著图则方便后续评价算法效果。
+
+**为了分析算法为什么得到这样的结果，还可以增加两类图。**
+
+**1. 四侧背景查询结果图**
+
+展示每一侧分别查询、归一化并取反之后的显著图：
+
+```text
+上侧查询显著图 ｜ 下侧查询显著图
+左侧查询显著图 ｜ 右侧查询显著图
+```
+
+也就是：
+
+\[
+s_{\mathrm{side}}
+=
+1-\operatorname{normalize}(B y_{\mathrm{side}})
+\]
+
+这些图能够帮助你观察：上、下、左、右四侧分别抑制了哪些区域，以及某一侧是否误把主体当成背景。
+
+这里建议展示**取反后的显著图**，这样它们与第一阶段、最终结果的灰度含义一致，都是越白越显著。
+
+**2. 前景查询节点分布图**
+
+展示第一阶段选出了哪些超像素作为前景查询：
+
+\[
+Q[y,x]
+=
+y_{\mathrm{foreground}}\big[\operatorname{labels}[y,x]\big]
+\]
+
+它是一张二值图：
+
+- 白色：被选为前景查询的超像素；
+- 黑色：其余超像素。
+
+也可以把选中的区域用半透明颜色叠加到原图上，方便观察这些查询是否覆盖了主体。这张图展示的是**第二阶段的查询输入**，最终显著图仍然是连续分数图。
+
+目前可以按下面的顺序实现：
+
+1. 第一阶段显著图和最终显著图。
+2. 原图、第一阶段、最终结果的三联图。
+3. 四侧查询结果图。
+4. 前景查询节点分布图。
+
+所有连续显著图都统一使用 `[0, 1]` 的显示范围，保持相同的黑白含义；已有的超像素边界图则继续由 SLIC 可视化部分提供。
+
+---
+
+## 第 89 次问答
+
+时间：2026-10-24 21:03:29 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+我觉得是不是加上一个前景查询二值图会更好
+
+**助手（2026-10-24 21:04:04 +08:00）：**
+
+**是的，加上前景查询二值图会更完整。** 它正好把两个阶段连接起来，让人看清楚：第一阶段的结果选出了哪些区域，以及第二阶段如何根据这些区域得到最终显著图。
+
+这样可以做成四联图：
+
+```text
+原图 ｜ 第一阶段显著图 ｜ 前景查询二值图 ｜ 最终显著图
+```
+
+前景查询二值图直接展示第二阶段实际使用的查询向量：
+
+\[
+Q[y,x]
+=
+y_{\mathrm{foreground}}\big[\operatorname{labels}[y,x]\big]
+\]
+
+其中：
+
+- **白色**：被选为前景查询的超像素；
+- **黑色**：未被选中的超像素。
+
+它能够帮助你判断前景查询是否覆盖主体、是否混入背景，以及第二阶段是否把查询信息扩展到了主体的其他区域。
+
+实现时，建议直接保存并展示**前景查询函数实际使用的 `query_vector`**，再通过 `labels` 映射回像素图。这样展示的就是算法真正使用的查询结果。
+
+四张图的标题可以统一为：**“原图”“初始显著图”“前景查询区域”“最终显著图”**。
+
+---
+
+## 第 90 次问答
+
+时间：2026-10-24 21:15:37 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""显著性结果的灰度图、前景查询二值图和对比展示"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from .superpixels import _chinese_font
+
+
+def saliency_image(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """
+    将超像素显著性分数映射成像素级灰度图
+    第一阶段和最终阶段都使用这个函数，保留分数原有的 [0, 1] 范围
+    """
+    return scores[labels]
+
+
+def foreground_query_image(
+    initial_scores: np.ndarray,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """
+    根据第一阶段分数生成前景查询二值图
+    不低于超像素平均显著值的节点设为 True，与前景查询的选择规则一致
+    显示时白色表示入选的前景查询区域，黑色表示其余区域
+    """
+
+    saliency_map = initial_scores[labels]
+    threshold = saliency_map.mean()
+    return saliency_map > threshold  # 顺手把 >= 写成了 >
+
+
+def plot_saliency(image: np.ndarray, title: str = "显著图"):
+    """
+    展示单张显著图或前景查询二值图，返回 Figure
+    """
+    font = _chinese_font()
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.imshow(image, cmap="gray")
+    ax.set_title(title, fontproperties=font, fontsize=13)
+    ax.axis("off")
+    plt.tight_layout()
+
+    return fig
+
+
+def plot_stage_comparison(
+    initial_saliency: np.ndarray,
+    final_saliency: np.ndarray,
+    title: str = None,
+):
+    """
+    并排展示第一阶段与最终显著图，返回 Figure
+    """
+    font = _chinese_font()
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+    # 真人只有两张图时，通常直接复制粘贴两遍，不会用 zip
+    axes[0].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
+    axes[0].set_title("第一阶段显著图", fontproperties=font, fontsize=13)
+    axes[0].axis("off")
+
+    axes[1].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
+    axes[1].set_title("最终显著图", fontproperties=font, fontsize=13)
+    axes[1].axis("off")
+
+    if title:
+        fig.suptitle(title, fontproperties=font, fontsize=14)
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_saliency_comparison(
+    original: np.ndarray,
+    initial_saliency: np.ndarray,
+    foreground_queries: np.ndarray,
+    final_saliency: np.ndarray,
+    title: str = None,
+):
+    """
+    并排展示原图、第一阶段显著图、前景查询二值图和最终显著图
+    接收分别生成好的三张结果图，返回 Figure 供调用方保存或显示
+    """
+    font = _chinese_font()
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+    imgs = [original, foreground_queries, initial_saliency, final_saliency]
+    titles = ["原图", "第一阶段显著图", "前景查询二值图", "最终显著图"]
+
+    for i in range(4):
+        if i == 0:
+            axes[i].imshow(imgs[i])
+        else:
+            axes[i].imshow(imgs[i], cmap="gray")
+        axes[i].set_title(titles[i], fontproperties=font, fontsize=13)
+        axes[i].axis("off")
+
+    if title:
+        plt.suptitle(title, fontproperties=font, fontsize=14)
+
+    plt.tight_layout()
+    return fig
+```
+
+我实现了显著性可视化部分，请你检查一下
+
+**助手（2026-10-24 21:16:57 +08:00）：**
+
+**`saliency_image()` 的映射是正确的，但其他部分有五处需要修正：阈值计算范围、阈值比较符号、两联图的第二张图片、四联图的图片顺序，以及灰度显示范围。**
+
+**1. 前景阈值应该在超像素分数上求平均。**
+
+你现在先映射成像素图，再计算均值：
+
+```python
+saliency_map = initial_scores[labels]
+threshold = saliency_map.mean()
+```
+
+这样得到的是**按超像素面积加权的平均值**，面积较大的区域影响更大。我们的前景查询规则使用的是：
+
+```python
+threshold = initial_scores.mean()
+```
+
+例如，三个超像素的分数为 `[0, 0.6, 1]`，面积分别为 `[1, 1, 8]`：
+
+- 超像素分数的均值约为 `0.533`；
+- 映射到像素后，均值为 `0.86`。
+
+这样，分数为 `0.6` 的区域是否入选就会发生变化。
+
+**2. 比较符号应该使用 `>=`。**
+
+你的文档写的是“不低于平均显著值”，因此应使用 `>=`。等于阈值的节点也应该被选中。
+
+这两处一起修改后，函数可以写成：
+
+```python
+def foreground_query_image(
+    initial_scores: np.ndarray,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """将不低于超像素平均显著值的节点映射为前景查询二值图。"""
+    threshold = initial_scores.mean()
+    query_nodes = initial_scores >= threshold
+
+    return query_nodes[labels]
+```
+
+这样先在节点层面确定查询，再映射到像素层面，与实际前景查询过程一致。
+
+**3. 两联图的第二张图片用错了变量。**
+
+你现在两次都显示了 `initial_saliency`：
+
+```python
+axes[1].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
+```
+
+第二张应改为：
+
+```python
+axes[1].imshow(final_saliency, cmap="gray", vmin=0, vmax=1)
+```
+
+否则，两张图片看起来完全一样，只是标题不同，无法观察第二阶段的效果。
+
+**4. 四联图中的图片顺序与标题不对应。**
+
+你现在写的是：
+
+```python
+imgs = [original, foreground_queries, initial_saliency, final_saliency]
+titles = ["原图", "第一阶段显著图", "前景查询二值图", "最终显著图"]
+```
+
+第二张和第三张图片放反了。应改为：
+
+```python
+imgs = [
+    original,
+    initial_saliency,
+    foreground_queries,
+    final_saliency,
+]
+
+titles = [
+    "原图",
+    "第一阶段显著图",
+    "前景查询二值图",
+    "最终显著图",
+]
+```
+
+**5. 单图和四联图的灰度范围应固定为 `[0, 1]`。**
+
+你的两联图已经正确设置了：
+
+```python
+vmin=0, vmax=1
+```
+
+但 `plot_saliency()` 和四联图中还没有设置。缺少这两个参数时，Matplotlib 默认根据每张图的数据范围自动调整灰度，可能改变分数的视觉含义。
+
+例如，一张图的分数最大只有 `0.2`，自动调整后，`0.2` 也可能显示为白色；全 `1` 的查询图还可能因为最小值和最大值相同而显示成黑色。
+
+单图中改成：
+
+```python
+ax.imshow(image, cmap="gray", vmin=0, vmax=1)
+```
+
+四联图中改成：
+
+```python
+for i in range(4):
+    if i == 0:
+        axes[i].imshow(imgs[i])
+    else:
+        axes[i].imshow(
+            imgs[i],
+            cmap="gray",
+            vmin=0,
+            vmax=1,
+        )
+
+    axes[i].set_title(
+        titles[i],
+        fontproperties=font,
+        fontsize=13,
+    )
+    axes[i].axis("off")
+```
+
+另外，两个可选标题的类型标注可以写得更准确：
+
+```python
+title: str | None = None
+```
+
+这不影响当前运行，属于类型标注的小调整。主要需要修正的是前面五处，它们会直接影响查询区域或展示结果。
+
+---
+
+## 第 91 次问答
+
+时间：2026-10-24 21:25:21 +08:00｜使用者：本项目作者｜工具／模型：Codex / gpt-6-astra
+
+**用户：**
+
+```python
+"""显著性结果的灰度图、前景查询二值图和对比展示"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from .superpixels import _chinese_font
+
+
+def saliency_image(scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """
+    将超像素显著性分数映射成像素级灰度图
+    第一阶段和最终阶段都使用这个函数，保留分数原有的 [0, 1] 范围
+    """
+    return scores[labels]
+
+
+def foreground_query_image(
+    initial_scores: np.ndarray,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """
+    根据第一阶段分数生成前景查询二值图
+    不低于超像素平均显著值的节点设为 True，与前景查询的选择规则一致
+    显示时白色表示入选的前景查询区域，黑色表示其余区域
+    """
+    threshold = initial_scores.mean()
+    query_mask = initial_scores >= threshold
+    return query_mask[labels]
+
+
+def plot_saliency(image: np.ndarray, title: str = "显著图"):
+    """
+    展示单张显著图或前景查询二值图，返回 Figure
+    """
+    font = _chinese_font()
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.imshow(image, cmap="gray", vmin=0, vmax=1)
+    ax.set_title(title, fontproperties=font, fontsize=13)
+    ax.axis("off")
+    plt.tight_layout()
+
+    return fig
+
+
+def plot_stage_comparison(
+    initial_saliency: np.ndarray,
+    final_saliency: np.ndarray,
+    title: str = None,
+):
+    """
+    并排展示第一阶段与最终显著图，返回 Figure
+    """
+    font = _chinese_font()
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+    axes[0].imshow(initial_saliency, cmap="gray", vmin=0, vmax=1)
+    axes[0].set_title("第一阶段显著图", fontproperties=font, fontsize=13)
+    axes[0].axis("off")
+
+    axes[1].imshow(final_saliency, cmap="gray", vmin=0, vmax=1)
+    axes[1].set_title("最终显著图", fontproperties=font, fontsize=13)
+    axes[1].axis("off")
+
+    if title:
+        fig.suptitle(title, fontproperties=font, fontsize=14)
+    fig.tight_layout()
+
+    return fig
+
+
+def plot_saliency_comparison(
+    original: np.ndarray,
+    initial_saliency: np.ndarray,
+    foreground_queries: np.ndarray,
+    final_saliency: np.ndarray,
+    title: str = None,
+):
+    """
+    并排展示原图、第一阶段显著图、前景查询二值图和最终显著图
+    接收分别生成好的三张结果图，返回 Figure 供调用方保存或显示
+    """
+    font = _chinese_font()
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+    imgs = [original, initial_saliency, foreground_queries, final_saliency]
+    titles = ["原图", "第一阶段显著图", "前景查询二值图", "最终显著图"]
+
+    for i in range(4):
+        if i == 0:
+            axes[i].imshow(imgs[i])
+        else:
+            axes[i].imshow(imgs[i], cmap="gray", vmin=0, vmax=1)
+        axes[i].set_title(titles[i], fontproperties=font, fontsize=13)
+        axes[i].axis("off")
+
+    if title:
+        plt.suptitle(title, fontproperties=font, fontsize=14)
+
+    plt.tight_layout()
+    return fig
+```
+
+这样呢
+
+**助手（2026-10-24 21:25:49 +08:00）：**
+
+**这次修改正确，前面指出的五处问题都已经修复。** 按我们之前约定的输入格式，这份代码的主要逻辑没有问题：
+
+- 前景查询在**超像素分数上求平均**，使用 `>=` 选择节点，再映射回像素图。
+- 两联图分别显示 `initial_saliency` 和 `final_saliency`；四联图的图片顺序与标题一致。
+- 所有显著图和二值图都固定使用 `[0, 1]` 的灰度范围。
+
+还有两处可以顺便统一，**都不影响当前功能**：
+
+1. 可选标题的类型标注改为：
+
+   ```python
+   title: str | None = None
+   ```
+
+2. 既然已经持有 `fig`，可以统一通过它设置总标题和布局：
+
+   ```python
+   if title:
+       fig.suptitle(title, fontproperties=font, fontsize=14)
+   
+   fig.tight_layout()
+   ```
+
+   `plot_saliency()` 中也可以将 `plt.tight_layout()` 换成 `fig.tight_layout()`，让几个函数的写法一致。
+
+以上是对你贴出的代码进行的检查，实际图片排版和中文字体显示还需要通过生成样例图确认。
+
+---
+
+## 代码生成记录（IDE ／ Agent）：全流程显著性检测 Demo 与 SLIC Demo 更新
+
+使用者：本项目作者｜工具／模型：gpt 6.1 sol
+
+时间：2026-10-24 21:39:41 +08:00。
+
+**用户：**
+
+我已经完成了全流程的算法，调用接口是pipeline.py。同时我将可视化部分集成到了visualization中。现在我希望你参考之前的demo_slic，给我一个全流程显著性检测的demo，调用方法和demo_slic类似，要求输出saliency中的图像
+同时slic部分的可视化模块也集成到了可视化模块中，请你修改demo_slic
+
+**AI：**
+
+已新增 [demo_saliency.py](/home/hhr/3_autumn/media/Saliency_Detection/demo/demo_saliency.py)，并更新 [demo_slic.py](/home/hhr/3_autumn/media/Saliency_Detection/demo/demo_slic.py) 使用统一可视化接口。
+
+运行：
+```bash
+python demo/demo_saliency.py images/horse.jpg --name horse_demo
+python demo/demo_slic.py images/horse.jpg --name horse_demo
+```
+
+结果分别保存到 `outputs/saliency/horse_demo/` 和 `outputs/slic/horse_demo/`。两个脚本都支持 `--save-dir`、`--show` 和算法参数。
+
+显著性 demo 输出原图、三张结果图、两阶段对比图、四联图及 `metadata.json`。`pipeline` 新增 `return_details=True` 获取中间结果，默认调用仍返回最终显著图。
+
+已实际运行两个 demo 并核对输出，未运行 pytest。可查看生成的[四联图示例](/home/hhr/3_autumn/media/Saliency_Detection/outputs/saliency/horse_full_demo/comparison.png)。
+
+**对应 Git 提交：**
+
+- 提交时间：2026-10-24 21:39:03 +08:00。
+- 完整版本号：`45a2a7f5a651389ea4ef88fffda99251444b7607`。
+- 提交说明原文：`增加显著性检测demo`。
+- 提交者：hhr2449。
+- 涉及文件：`demo/demo_saliency.py`、`demo/demo_slic.py`、`src/pipeline.py`。
+- 改动统计：3 个文件，新增 204 行，删除 14 行；新增文件为 `demo/demo_saliency.py`。
+
+## 采用、修正与验证（显著性可视化与 Demo）
+
+- 涉及的算法／文件：显著性分数到像素灰度图的映射、前景查询二值图、两阶段对比和四联图；涉及 `src/visualization/`、`src/pipeline.py`、`demo/demo_saliency.py`、`demo/demo_slic.py`。
+- 本人完成的工作与 AI 辅助范围：本人完成全流程算法及 pipeline 接口，将可视化整理到独立模块，并实现显著性可视化函数；AI 辅助讨论展示内容、检查本人提供的可视化代码，再根据本人要求生成全流程 Demo、调整 SLIC Demo，并为 pipeline 增加中间结果返回选项。
+- 采用或放弃的建议：采用原图、第一阶段显著图、前景查询二值图和最终显著图的四联展示；采用生成的 Demo 改动。`return_details=True` 返回中间结果，默认调用继续返回最终显著图；两个 Demo 使用统一可视化接口，分别输出到 `outputs/saliency/` 和 `outputs/slic/` 下的图名目录。
+- 发现的问题及修正：本人提交可视化代码后，AI 指出五处问题：前景阈值误用像素均值、比较符号误用 `>`、两联图第二幅重复显示初始图、四联图中间两幅顺序与标题不符、部分灰度图缺少固定显示范围。本人随后修改为超像素均值和 `>=`，修正图片变量与顺序，并统一设置 `vmin=0, vmax=1`；修改后的代码已在第 91 次问答中核对。本次未报告对 AI 生成 Demo 的额外修正。
+- 验证方法与结果：实际输出结果正确
+
+---
+

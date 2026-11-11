@@ -12,6 +12,7 @@ from .saliency import (
     plot_saliency,
     plot_stage_comparison,
     plot_saliency_comparison,
+    plot_k_comparison,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "plot_saliency",
     "plot_stage_comparison",
     "plot_saliency_comparison",
+    "plot_k_comparison",
 ]

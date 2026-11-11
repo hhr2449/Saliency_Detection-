@@ -98,3 +98,40 @@ def plot_saliency_comparison(
 
     plt.tight_layout()
     return fig
+
+
+def plot_k_comparison(
+    original: np.ndarray,
+    saliency_maps: list[np.ndarray],
+    k_values: list[int],
+    actual_counts: list[int],
+    title: str | None = None,
+):
+    """
+    并排展示原图和不同期望超像素数量下的最终显著图
+    K 表示期望数量，N 表示连通性处理后的实际超像素数量
+    """
+    font = _chinese_font()
+    n_panels = len(saliency_maps) + 1
+    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5))
+
+    axes[0].imshow(original)
+    axes[0].set_title("原图", fontproperties=font, fontsize=13)
+    axes[0].axis("off")
+
+    for ax, image, k, n in zip(axes[1:], saliency_maps, k_values, actual_counts):
+        ax.imshow(image, cmap="gray", vmin=0, vmax=1)
+        ax.set_title(
+            f"K={k} 的最终显著图\nN={n}",
+            fontproperties=font,
+            fontsize=13,
+        )
+        ax.axis("off")
+
+    if title:
+        fig.suptitle(title, fontproperties=font, fontsize=14)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+    else:
+        fig.tight_layout()
+
+    return fig
